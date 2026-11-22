@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach assets to (defaults to github.ref_name)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-22.04
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    # Build inside Debian 11 (glibc 2.31) so libpam_mirage.so and binaries
+    # remain forward-compatible across modern Linux distributions.
+    container:
+      image: rust:1-bullseye
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PAM development headers
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libpam0g-dev pkg-config
+
+      - name: Cache Cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-cargo-
+
+      - name: Build release binaries and libpam_mirage.so
+        run: cargo build --release --workspace
+
+      - name: Package release archive
+        run: |
+          mkdir -p dist/pkg
+          cp target/release/mirage-daemon dist/pkg/
+          cp target/release/mirage-fake-shell dist/pkg/
+          cp target/release/libpam_mirage.so dist/pkg/
+          cp config.example.toml dist/pkg/
+          chmod +x dist/pkg/mirage-daemon dist/pkg/mirage-fake-shell
+          tar -C dist/pkg -czf "dist/mirage-linux-${{ matrix.arch }}.tar.gz" \
+            mirage-daemon \
+            mirage-fake-shell \
+            libpam_mirage.so \
+            config.example.toml
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirage-linux-${{ matrix.arch }}
+          path: dist/mirage-linux-${{ matrix.arch }}.tar.gz
+
+  publish:
+    name: Publish Release Assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum mirage-linux-*.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            dist/mirage-linux-*.tar.gz
+            dist/SHA256SUMS.txt

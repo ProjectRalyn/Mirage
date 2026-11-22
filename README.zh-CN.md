@@ -11,6 +11,76 @@
 
 ---
 
+## 快速开始
+
+### 一键部署与管理脚本（Linux `x86_64` / `aarch64`）
+
+自动从 GitHub Releases 拉取最新预编译的 `mirage-daemon`、`mirage-fake-shell` 与 `libpam_mirage.so`，配置 `systemd` 服务与 `/etc/mirage/config.toml`，并支持交互式配置、编辑以及一键挂载原生 OpenSSH PAM（`libpam_mirage.so` + `ForceCommand`）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ProjectRalyn/Mirage/main/mirage.sh -o mirage.sh
+chmod +x mirage.sh
+sudo ./mirage.sh
+```
+
+也支持直接通过子命令调用：`sudo ./mirage.sh deploy`、`sudo ./mirage.sh install`、`sudo ./mirage.sh pam-setup`、`sudo ./mirage.sh edit`、`sudo ./mirage.sh status`、`sudo ./mirage.sh logs`、`sudo ./mirage.sh uninstall`。
+
+### 源码编译与测试
+
+```bash
+git clone git@github.com:ProjectRalyn/Mirage.git
+cd Mirage
+
+# 运行全工作区 14 项单元与集成测试
+cargo test --workspace
+
+# 编译 Release 二进制与 libpam_mirage.so
+cargo build --release --workspace
+```
+
+### 运行示例
+
+```bash
+# 1. 启动四合一独立蜜罐（HTTP / SSH / Redis / PostgreSQL）
+cargo run --release --bin mirage-daemon -- \
+  --http-addr 0.0.0.0:8080 \
+  --ssh-addr 0.0.0.0:2222 \
+  --redis-addr 0.0.0.0:16379 \
+  --pg-addr 0.0.0.0:15432 \
+  --rotation-secs 300
+
+# 2. 作为 HTTP 前线反代运行在真实服务 (:3000) 之前
+cargo run --release --bin mirage-daemon -- \
+  --http-mode frontline-proxy \
+  --http-addr 0.0.0.0:8080 \
+  --upstream-http http://127.0.0.1:3000
+
+# 3. 一键生成 Nginx / Caddy / OpenSSH PAM .so / TOML 配置模板
+cargo run --bin mirage-daemon -- --print-nginx-config
+cargo run --bin mirage-daemon -- --print-caddy-config
+cargo run --bin mirage-daemon -- --print-sshd-config
+cargo run --bin mirage-daemon -- --print-default-config > config.toml
+```
+
+### 嵌入 Axum 服务
+
+参考 [`crates/mirage-http/examples/axum_embed.rs`](crates/mirage-http/examples/axum_embed.rs)：
+
+```rust
+use axum::{routing::get, Router};
+use mirage_core::{MirageConfig, MirageEngine};
+use mirage_http::MirageHttpLayer;
+
+let engine = MirageEngine::new(MirageConfig::default());
+engine.spawn_rotation_task();
+
+let app = Router::new()
+    .route("/api/health", get(|| async { "OK" }))
+    .layer(MirageHttpLayer::new(engine));
+```
+
+---
+
 ## 核心特性
 
 ### 1. 零拷贝预生成与定时轮换
@@ -76,64 +146,6 @@ crates/
 ├── mirage-ssh    # 加密 SSH-2 传输层、Endlessh Pre-Banner Tarpit、FrontlineProxy 分流器、ForceCommand 终端
 ├── mirage-pam    # 原生 OpenSSH 接入用 Linux PAM 动态链接库 (libpam_mirage.so)
 └── mirage-bin    # `mirage-daemon`（多协议守护进程）与 `mirage-fake-shell`（OpenSSH ForceCommand 二进制）
-```
-
----
-
-## 快速开始
-
-### 编译与测试
-
-```bash
-git clone git@github.com:ProjectRalyn/Mirage.git
-cd Mirage
-
-# 运行全工作区 14 项单元与集成测试
-cargo test --workspace
-
-# 编译 Release 二进制与 libpam_mirage.so
-cargo build --release --workspace
-```
-
-### 运行示例
-
-```bash
-# 1. 启动四合一独立蜜罐（HTTP / SSH / Redis / PostgreSQL）
-cargo run --release --bin mirage-daemon -- \
-  --http-addr 0.0.0.0:8080 \
-  --ssh-addr 0.0.0.0:2222 \
-  --redis-addr 0.0.0.0:16379 \
-  --pg-addr 0.0.0.0:15432 \
-  --rotation-secs 300
-
-# 2. 作为 HTTP 前线反代运行在真实服务 (:3000) 之前
-cargo run --release --bin mirage-daemon -- \
-  --http-mode frontline-proxy \
-  --http-addr 0.0.0.0:8080 \
-  --upstream-http http://127.0.0.1:3000
-
-# 3. 一键生成 Nginx / Caddy / OpenSSH PAM .so / TOML 配置模板
-cargo run --bin mirage-daemon -- --print-nginx-config
-cargo run --bin mirage-daemon -- --print-caddy-config
-cargo run --bin mirage-daemon -- --print-sshd-config
-cargo run --bin mirage-daemon -- --print-default-config > config.toml
-```
-
-### 嵌入 Axum 服务
-
-参考 [`crates/mirage-http/examples/axum_embed.rs`](crates/mirage-http/examples/axum_embed.rs)：
-
-```rust
-use axum::{routing::get, Router};
-use mirage_core::{MirageConfig, MirageEngine};
-use mirage_http::MirageHttpLayer;
-
-let engine = MirageEngine::new(MirageConfig::default());
-engine.spawn_rotation_task();
-
-let app = Router::new()
-    .route("/api/health", get(|| async { "OK" }))
-    .layer(MirageHttpLayer::new(engine));
 ```
 
 ---

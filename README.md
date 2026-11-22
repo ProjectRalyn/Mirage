@@ -11,6 +11,76 @@
 
 ---
 
+## Quick Start
+
+### One-Click Deploy & Manage (Linux `x86_64` / `aarch64`)
+
+Pulls the latest prebuilt `mirage-daemon`, `mirage-fake-shell`, and `libpam_mirage.so` from GitHub Releases, sets up `systemd`, configures `/etc/mirage/config.toml`, and optionally hooks into native OpenSSH PAM (`libpam_mirage.so` + `ForceCommand`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ProjectRalyn/Mirage/main/mirage.sh -o mirage.sh
+chmod +x mirage.sh
+sudo ./mirage.sh
+```
+
+Direct subcommands are also supported: `sudo ./mirage.sh deploy`, `sudo ./mirage.sh install`, `sudo ./mirage.sh pam-setup`, `sudo ./mirage.sh edit`, `sudo ./mirage.sh status`, `sudo ./mirage.sh logs`, `sudo ./mirage.sh uninstall`.
+
+### Build & Test (From Source)
+
+```bash
+git clone git@github.com:ProjectRalyn/Mirage.git
+cd Mirage
+
+# Run all 14 unit and integration tests
+cargo test --workspace
+
+# Build release binaries and libpam_mirage.so
+cargo build --release --workspace
+```
+
+### Run Standalone / Frontline / Behind-Proxy Daemon
+
+```bash
+# 1. Standalone multi-protocol honeypot (HTTP, SSH, Redis, PostgreSQL)
+cargo run --release --bin mirage-daemon -- \
+  --http-addr 0.0.0.0:8080 \
+  --ssh-addr 0.0.0.0:2222 \
+  --redis-addr 0.0.0.0:16379 \
+  --pg-addr 0.0.0.0:15432 \
+  --rotation-secs 300
+
+# 2. HTTP Frontline Reverse Proxy in front of your real app on :3000
+cargo run --release --bin mirage-daemon -- \
+  --http-mode frontline-proxy \
+  --http-addr 0.0.0.0:8080 \
+  --upstream-http http://127.0.0.1:3000
+
+# 3. Generate integration configs for Nginx, Caddy, or OpenSSH PAM .so
+cargo run --bin mirage-daemon -- --print-nginx-config
+cargo run --bin mirage-daemon -- --print-caddy-config
+cargo run --bin mirage-daemon -- --print-sshd-config
+cargo run --bin mirage-daemon -- --print-default-config > config.toml
+```
+
+### Embed in an Axum Service
+
+See [`crates/mirage-http/examples/axum_embed.rs`](crates/mirage-http/examples/axum_embed.rs):
+
+```rust
+use axum::{routing::get, Router};
+use mirage_core::{MirageConfig, MirageEngine};
+use mirage_http::MirageHttpLayer;
+
+let engine = MirageEngine::new(MirageConfig::default());
+engine.spawn_rotation_task();
+
+let app = Router::new()
+    .route("/api/health", get(|| async { "OK" }))
+    .layer(MirageHttpLayer::new(engine));
+```
+
+---
+
 ## Key Capabilities
 
 ### 1. Zero-Copy Pre-Generation & Scheduled Rotation
@@ -76,64 +146,6 @@ crates/
 ├── mirage-ssh    # Encrypted SSH-2 transport, Endlessh pre-banner tarpit, FrontlineProxy multiplexer, ForceCommand stdio shell
 ├── mirage-pam    # Linux PAM shared library (libpam_mirage.so) for native OpenSSH integration
 └── mirage-bin    # `mirage-daemon` (multi-protocol server) & `mirage-fake-shell` (OpenSSH ForceCommand binary)
-```
-
----
-
-## Quick Start
-
-### Build & Test
-
-```bash
-git clone git@github.com:ProjectRalyn/Mirage.git
-cd Mirage
-
-# Run all 14 unit and integration tests
-cargo test --workspace
-
-# Build release binaries and libpam_mirage.so
-cargo build --release --workspace
-```
-
-### Run Standalone / Frontline / Behind-Proxy Daemon
-
-```bash
-# 1. Standalone multi-protocol honeypot (HTTP, SSH, Redis, PostgreSQL)
-cargo run --release --bin mirage-daemon -- \
-  --http-addr 0.0.0.0:8080 \
-  --ssh-addr 0.0.0.0:2222 \
-  --redis-addr 0.0.0.0:16379 \
-  --pg-addr 0.0.0.0:15432 \
-  --rotation-secs 300
-
-# 2. HTTP Frontline Reverse Proxy in front of your real app on :3000
-cargo run --release --bin mirage-daemon -- \
-  --http-mode frontline-proxy \
-  --http-addr 0.0.0.0:8080 \
-  --upstream-http http://127.0.0.1:3000
-
-# 3. Generate integration configs for Nginx, Caddy, or OpenSSH PAM .so
-cargo run --bin mirage-daemon -- --print-nginx-config
-cargo run --bin mirage-daemon -- --print-caddy-config
-cargo run --bin mirage-daemon -- --print-sshd-config
-cargo run --bin mirage-daemon -- --print-default-config > config.toml
-```
-
-### Embed in an Axum Service
-
-See [`crates/mirage-http/examples/axum_embed.rs`](crates/mirage-http/examples/axum_embed.rs):
-
-```rust
-use axum::{routing::get, Router};
-use mirage_core::{MirageConfig, MirageEngine};
-use mirage_http::MirageHttpLayer;
-
-let engine = MirageEngine::new(MirageConfig::default());
-engine.spawn_rotation_task();
-
-let app = Router::new()
-    .route("/api/health", get(|| async { "OK" }))
-    .layer(MirageHttpLayer::new(engine));
 ```
 
 ---
