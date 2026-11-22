@@ -1,4 +1,4 @@
-# MiragePot Configuration Example
+# Mirage Configuration Example
 # Pre-generated deception payloads rotate automatically every `rotation_interval_secs`.
 rotation_interval_secs = 300
 persona_slots = 16

@@ -22,7 +22,7 @@ pub struct ThreatEvent {
     pub detail: String,
 }
 
-/// Live atomic metrics for the MiragePot engine.
+/// Live atomic metrics for the Mirage engine.
 #[derive(Debug, Default)]
 pub struct MirageMetrics {
     pub current_epoch: AtomicU64,
@@ -187,7 +187,7 @@ impl MirageEngine {
             slots = new_snapshot.personas.len(),
             sample_host = %new_snapshot.personas[0].hostname,
             sample_ssh_banner = %new_snapshot.personas[0].ssh_banner,
-            "Rotated MiragePot pre-generated persona snapshot"
+            "Rotated Mirage pre-generated persona snapshot"
         );
 
         new_snapshot
@@ -322,7 +322,7 @@ impl MirageEngine {
             client_ip = %client_ip,
             trap = %trap_kind,
             detail = %detail,
-            "MiragePot deception trap triggered"
+            "Mirage deception trap triggered"
         );
 
         let event = ThreatEvent {

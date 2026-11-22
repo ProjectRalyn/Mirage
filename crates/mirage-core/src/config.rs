@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
 
-/// Root configuration for the MiragePot deception & tarpit component.
+/// Root configuration for the Mirage deception & tarpit component.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MirageConfig {
@@ -286,7 +286,7 @@ pub enum SshDeployMode {
     Standalone,
     /// Frontline SSH reverse proxy / multiplexer sitting in front of real `upstream_sshd_addr`:
     /// trusted IPs or secret-banner admin clients are transparently spliced to real `sshd`,
-    /// while scanners and untrusted attackers enter the MiragePot SSH-2 honeypot / Endlessh tarpit.
+    /// while scanners and untrusted attackers enter the Mirage SSH-2 honeypot / Endlessh tarpit.
     FrontlineProxy,
 }
 

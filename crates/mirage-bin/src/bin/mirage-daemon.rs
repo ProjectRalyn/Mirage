@@ -194,7 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ssh_bind = %config.ssh.bind_addr,
         redis_bind = %config.redis.bind_addr,
         postgres_bind = %config.postgres.bind_addr,
-        "MiragePot initialized pre-baked deception pool"
+        "Mirage initialized pre-baked deception pool"
     );
 
     let _rotator_handle = engine.spawn_rotation_task();

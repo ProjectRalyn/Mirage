@@ -28,7 +28,7 @@ use tower_layer::Layer;
 use tower_service::Service;
 use tracing::{info, warn};
 
-/// A `tower::Layer` that wraps any HTTP service (Axum, Hyper, Tower) with MiragePot
+/// A `tower::Layer` that wraps any HTTP service (Axum, Hyper, Tower) with Mirage
 /// zero-copy deception traps and slow-drip tarpits.
 #[derive(Clone)]
 pub struct MirageHttpLayer {
@@ -902,10 +902,10 @@ pub async fn run_standalone_http_server(engine: Arc<MirageEngine>) -> std::io::R
             upstream = ?engine.config().http.upstream_http_url,
             status_url = %format!("http://{}{}/status", bind_addr, engine.admin_path_prefix()),
             rotate_url = %format!("http://{}{}/rotate", bind_addr, engine.admin_path_prefix()),
-            "MiragePot HTTP engine listening"
+            "Mirage HTTP engine listening"
         );
     } else {
-        info!(%bind_addr, ?mode, "MiragePot HTTP engine listening (admin panel disabled)");
+        info!(%bind_addr, ?mode, "Mirage HTTP engine listening (admin panel disabled)");
     }
     let app = build_standalone_router(engine);
     axum::serve(
@@ -915,15 +915,15 @@ pub async fn run_standalone_http_server(engine: Arc<MirageEngine>) -> std::io::R
     .await
 }
 
-/// Generate a ready-to-use Nginx configuration showing how to place MiragePot BEHIND Nginx
-/// in `behind_proxy_sink` mode (diverting scanner/WAF/attack routes into MiragePot while keeping
+/// Generate a ready-to-use Nginx configuration showing how to place Mirage BEHIND Nginx
+/// in `behind_proxy_sink` mode (diverting scanner/WAF/attack routes into Mirage while keeping
 /// real traffic flowing to your real app).
 pub fn generate_nginx_sink_config(mirage_addr: &str, real_upstream: &str) -> String {
     format!(
         r#"# ============================================================================
-# MiragePot Behind-Proxy Sink Integration for Nginx
+# Mirage Behind-Proxy Sink Integration for Nginx
 # ============================================================================
-# Run MiragePot with:
+# Run Mirage with:
 #   mirage-daemon --http-mode behind_proxy_sink --http-addr {mirage_addr}
 #
 # And set in config.toml:
@@ -952,7 +952,7 @@ server {{
     listen 80;
     server_name example.com;
 
-    # 1. Divert WordPress / secret leaks / actuator / SQL backup probes straight to MiragePot
+    # 1. Divert WordPress / secret leaks / actuator / SQL backup probes straight to Mirage
     location ~* ^/(wp-login\.php|wp-admin|wp-json|xmlrpc\.php|wp-config|wp-content/debug\.log|\.env|\.git|actuator|phpinfo\.php|backup\.sql|heapdump) {{
         proxy_pass http://mirage_honeypot_sink;
         proxy_set_header Host $host;
@@ -987,11 +987,11 @@ server {{
     )
 }
 
-/// Generate a ready-to-use Caddyfile showing how to place MiragePot BEHIND Caddy.
+/// Generate a ready-to-use Caddyfile showing how to place Mirage BEHIND Caddy.
 pub fn generate_caddy_sink_config(mirage_addr: &str, real_upstream: &str) -> String {
     format!(
         r#"# ============================================================================
-# MiragePot Behind-Proxy Sink Integration for Caddy
+# Mirage Behind-Proxy Sink Integration for Caddy
 # ============================================================================
 example.com {{
     @attack_probes {{
@@ -1076,7 +1076,7 @@ mod tests {
             let _ = axum::serve(upstream_listener, upstream_app).await;
         });
 
-        // 2. Configure MiragePot in FrontlineProxy mode pointing to that upstream
+        // 2. Configure Mirage in FrontlineProxy mode pointing to that upstream
         let mut cfg = MirageConfig::default();
         cfg.http.mode = HttpDeployMode::FrontlineProxy;
         cfg.http.upstream_http_url = Some(format!("http://{upstream_addr}"));
@@ -1093,7 +1093,7 @@ mod tests {
         let benign_body = benign_resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(benign_body.as_ref(), b"REAL_UPSTREAM_ORDERS_OK");
 
-        // 4. Attack request (`/.env`) is trapped by MiragePot and NEVER reaches upstream!
+        // 4. Attack request (`/.env`) is trapped by Mirage and NEVER reaches upstream!
         let attack_req = Request::builder()
             .uri("/.env")
             .body(AxumBody::empty())

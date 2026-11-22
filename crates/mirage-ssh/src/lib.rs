@@ -19,12 +19,12 @@ pub async fn run_standalone_ssh_server(engine: Arc<MirageEngine>) -> io::Result<
         %bind_addr,
         ?mode,
         upstream = ?engine.config().ssh.upstream_sshd_addr,
-        "MiragePot SSH engine listening"
+        "Mirage SSH engine listening"
     );
     serve_ssh_listener(listener, engine).await
 }
 
-/// Serve an existing `TcpListener` with the MiragePot SSH engine.
+/// Serve an existing `TcpListener` with the Mirage SSH engine.
 pub async fn serve_ssh_listener(
     listener: TcpListener,
     engine: Arc<MirageEngine>,
@@ -452,7 +452,7 @@ mod tests {
             }
         });
 
-        // 2. Start MiragePot SSH in FrontlineProxy mode with a secret admin banner token
+        // 2. Start Mirage SSH in FrontlineProxy mode with a secret admin banner token
         let mut cfg = MirageConfig::default();
         cfg.ssh.mode = SshDeployMode::FrontlineProxy;
         cfg.ssh.upstream_sshd_addr = Some(mock_sshd_addr);

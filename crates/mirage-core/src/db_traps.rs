@@ -19,7 +19,7 @@ pub async fn run_standalone_redis_server(engine: Arc<MirageEngine>) -> io::Resul
     }
     let bind_addr = engine.config().redis.bind_addr;
     let listener = TcpListener::bind(bind_addr).await?;
-    info!(%bind_addr, "MiragePot Redis (RESP) honeypot listening");
+    info!(%bind_addr, "Mirage Redis (RESP) honeypot listening");
     serve_redis_listener(listener, engine).await
 }
 
@@ -342,7 +342,7 @@ pub async fn run_standalone_postgres_server(engine: Arc<MirageEngine>) -> io::Re
     }
     let bind_addr = engine.config().postgres.bind_addr;
     let listener = TcpListener::bind(bind_addr).await?;
-    info!(%bind_addr, "MiragePot PostgreSQL (PGWire v3) honeypot listening");
+    info!(%bind_addr, "Mirage PostgreSQL (PGWire v3) honeypot listening");
     serve_postgres_listener(listener, engine).await
 }
 
