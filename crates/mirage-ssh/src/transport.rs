@@ -3,7 +3,7 @@ use cipher::{KeyIvInit, StreamCipher};
 use ctr::Ctr128BE;
 use ed25519_dalek::{Signer, SigningKey};
 use hmac::{Hmac, Mac};
-use mirage_core::{FakeShellSession, MirageEngine, PrebakedPersona, SshAuthDecision};
+use mirage_deception::{FakeShellSession, MirageEngine, PrebakedPersona, SshAuthDecision};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::io;
@@ -648,7 +648,7 @@ async fn run_logged_shell_command(
     client_ip: IpAddr,
     session: &mut FakeShellSession,
     cmd_line: &str,
-) -> mirage_core::ShellExecResult {
+) -> mirage_deception::ShellExecResult {
     let trimmed = cmd_line.trim();
     if !trimmed.is_empty() {
         engine

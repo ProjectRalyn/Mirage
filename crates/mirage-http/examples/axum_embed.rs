@@ -1,6 +1,5 @@
 use axum::{routing::get, Router};
-use mirage_core::{MirageConfig, MirageEngine};
-use mirage_http::MirageHttpLayer;
+use web_mirage::{MirageConfig, MirageEngine, MirageHttpLayer};
 
 #[tokio::main]
 async fn main() {
@@ -10,7 +9,10 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/health", get(|| async { "OK" }))
-        .route("/api/v1/items", get(|| async { r#"[{"id":1,"name":"real-item"}]"# }))
+        .route(
+            "/api/v1/items",
+            get(|| async { r#"[{"id":1,"name":"real-item"}]"# }),
+        )
         // One-line integration: attack probes get trapped, benign routes reach Axum handlers
         .layer(MirageHttpLayer::new(engine));
 

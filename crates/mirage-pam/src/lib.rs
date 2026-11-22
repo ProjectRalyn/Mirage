@@ -16,7 +16,7 @@
 //!   attacker used the rotating password leaked in `/.env` or `/wp-config.php.bak`).
 
 use libc::{c_char, c_int, c_void};
-use mirage_core::{MirageConfig, MirageEngine};
+use mirage_deception::{MirageConfig, MirageEngine};
 use std::ffi::CStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;

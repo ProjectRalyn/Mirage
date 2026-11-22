@@ -1,5 +1,5 @@
 use clap::Parser;
-use mirage_core::{MirageConfig, MirageEngine};
+use mirage_deception::{MirageConfig, MirageEngine};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 

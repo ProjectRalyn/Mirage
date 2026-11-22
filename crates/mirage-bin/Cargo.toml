@@ -13,8 +13,8 @@ name = "mirage-fake-shell"
 path = "src/bin/mirage-fake-shell.rs"
 
 [dependencies]
-mirage-core = { path = "../mirage-core" }
-mirage-http = { path = "../mirage-http" }
+mirage-deception = { path = "../mirage-core" }
+web-mirage = { path = "../mirage-http" }
 mirage-ssh = { path = "../mirage-ssh" }
 tokio.workspace = true
 clap.workspace = true

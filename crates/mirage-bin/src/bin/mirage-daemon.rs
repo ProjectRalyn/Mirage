@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use mirage_core::{
+use mirage_deception::{
     run_standalone_postgres_server, run_standalone_redis_server, HttpDeployMode, MirageConfig,
     MirageEngine, SshDeployMode,
 };
@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli.print_nginx_config {
         println!(
             "{}",
-            mirage_http::generate_nginx_sink_config("127.0.0.1:8080", "127.0.0.1:3000")
+            web_mirage::generate_nginx_sink_config("127.0.0.1:8080", "127.0.0.1:3000")
         );
         return Ok(());
     }
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli.print_caddy_config {
         println!(
             "{}",
-            mirage_http::generate_caddy_sink_config("127.0.0.1:8080", "127.0.0.1:3000")
+            web_mirage::generate_caddy_sink_config("127.0.0.1:8080", "127.0.0.1:3000")
         );
         return Ok(());
     }
@@ -200,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _rotator_handle = engine.spawn_rotation_task();
 
     tokio::try_join!(
-        mirage_http::run_standalone_http_server(engine.clone()),
+        web_mirage::run_standalone_http_server(engine.clone()),
         mirage_ssh::run_standalone_ssh_server(engine.clone()),
         run_standalone_redis_server(engine.clone()),
         run_standalone_postgres_server(engine),

@@ -1,6 +1,6 @@
 pub mod transport;
 
-use mirage_core::{FakeShellSession, MirageEngine, PrebakedPersona, SshDeployMode};
+use mirage_deception::{FakeShellSession, MirageEngine, PrebakedPersona, SshDeployMode};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
@@ -381,7 +381,7 @@ Match User svc_deploy,admin,test,ubnt,postgres
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mirage_core::MirageConfig;
+    use mirage_deception::MirageConfig;
 
     #[tokio::test]
     async fn test_ssh_banner_rotation_and_kexinit_handshake() {

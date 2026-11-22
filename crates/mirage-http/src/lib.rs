@@ -11,10 +11,15 @@ use http_body_util::BodyExt;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use mirage_core::{
-    classify_http_request, FakeShellSession, HttpDeployMode, HttpRequestView, LfiTargetHint,
-    MirageEngine, PrebakedPersona, SinkFallbackTrap, TarpitKind, TarpitPermit, TrapVerdict,
+use mirage_deception::{
+    classify_http_request, FakeShellSession, HttpRequestView, LfiTargetHint, PrebakedPersona,
+    TarpitKind, TarpitPermit, TrapVerdict,
 };
+pub use mirage_deception::{
+    AdminPanelConfig, HttpDeployMode, HttpHoneypotConfig, MirageConfig, MirageEngine,
+    MirageMetricsSnapshot, SigilFilterConfig, SinkFallbackTrap, ThreatEvent,
+};
+pub use mirage_deception as core;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
@@ -1028,7 +1033,7 @@ example.com {{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mirage_core::MirageConfig;
+    use mirage_deception::MirageConfig;
     use tower::ServiceExt;
 
     #[tokio::test]

@@ -1,8 +1,13 @@
 [package]
-name = "mirage-core"
+name = "mirage-deception"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Core zero-copy persona rotation engine, sigil-filter attack classifier, in-memory Linux shell, and protocol traps for Mirage."
+repository = "https://github.com/ProjectRalyn/Mirage"
+homepage = "https://github.com/ProjectRalyn/Mirage"
+keywords = ["honeypot", "deception", "tarpit", "security", "waf"]
+categories = ["network-programming", "web-programming"]
 
 [dependencies]
 tokio.workspace = true

@@ -1,11 +1,17 @@
 [package]
-name = "mirage-http"
+name = "web-mirage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Embeddable zero-copy HTTP deception & tarpit Tower middleware (Axum/Hyper/Tower) with rotating fake WordPress, API, and sigil-filter attack traps."
+repository = "https://github.com/ProjectRalyn/Mirage"
+homepage = "https://github.com/ProjectRalyn/Mirage"
+readme = "README.md"
+keywords = ["honeypot", "axum", "tower", "security", "deception"]
+categories = ["web-programming::http-server", "network-programming"]
 
 [dependencies]
-mirage-core = { path = "../mirage-core" }
+mirage-deception = { version = "0.1.0", path = "../mirage-core" }
 tokio.workspace = true
 bytes.workspace = true
 http.workspace = true

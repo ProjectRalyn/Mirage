@@ -9,6 +9,6 @@ name = "pam_mirage"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-mirage-core = { path = "../mirage-core" }
+mirage-deception = { path = "../mirage-core" }
 libc.workspace = true
 serde_json.workspace = true
