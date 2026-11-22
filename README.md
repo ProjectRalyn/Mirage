@@ -2,9 +2,35 @@
 
 **Mirage** is a zero-compromise **OpenSSH Frontline Reverse Proxy & Pre-Auth CVE Shield** written in Rust.
 
-Mirage sits in front of your real OpenSSH `sshd` (e.g., Mirage on `0.0.0.0:22` -> real `sshd` on `127.0.0.1:22022`) so legitimate administrators experience 100% native OpenSSH authentication, keys, PAM, and SFTP, while pre-auth OpenSSH CVE exploits, malformed packets, slowloris/regreSSHion abuse, and scanners are intercepted **before ever touching `sshd`**.
+Mirage sits in front of your real OpenSSH `sshd` (e.g. Mirage on `0.0.0.0:22` -> real `sshd` on `127.0.0.1:22022`) so legitimate administrators experience 100% native OpenSSH authentication, keys, PAM, and SFTP, while pre-auth OpenSSH CVE exploits, malformed packets, slowloris/regreSSHion abuse, and scanners are intercepted **before ever touching `sshd`**.
 
-> HTTP deception & tarpits have been split out into the standalone **evilpot** project. Redis and PostgreSQL traps have been retired.
+---
+
+## Quick Start
+
+### One-Click Install & Auto-Configure OpenSSH
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/ProjectRalyn/Mirage/main/mirage.sh
+chmod +x mirage.sh
+sudo ./mirage.sh deploy
+```
+
+`mirage.sh deploy` will interactively:
+1. Download `mirage-daemon` and create `/etc/mirage/config.toml`.
+2. Configure per-category actions (`fail2ban`, `ssh_honeypot`, `endlessh_tarpit`, or `drop`) for brute-force bursts, pre-auth CVE probes, and scanner banners.
+3. Optionally move local OpenSSH `sshd` to `127.0.0.1:22022` (handles `ssh.socket` and SELinux, validates with `sshd -t` + live banner probe, and **auto-rolls back** on any failure) so Mirage safely takes port `22`.
+
+> Keep your current SSH session open and verify logging in from a new terminal before closing.  
+> Common management commands: `sudo ./mirage.sh status`, `sudo ./mirage.sh logs`, `sudo ./mirage.sh sshd-restore`, `sudo ./mirage.sh uninstall`.
+
+### Build from Source (Optional)
+
+```bash
+cargo build --release --workspace
+sudo install -m 0755 target/release/mirage-daemon /usr/local/bin/mirage-daemon
+sudo ./mirage.sh deploy
+```
 
 ---
 
@@ -15,7 +41,7 @@ Mirage sits in front of your real OpenSSH `sshd` (e.g., Mirage on `0.0.0.0:22` -
    - Enforces a strict `preauth_timeout_secs` deadline across banner + key-exchange (`SSH_MSG_NEWKEYS`), mitigating pre-auth `LoginGraceTime` / race exploits (e.g. CVE-2024-6387 regreSSHion).
 
 2. **Full-Duplex Pre-`NEWKEYS` Binary Packet & `sigil-filter` Inspection**
-   - Parses unencrypted pre-`NEWKEYS` SSH binary packets (`packet_length`, `padding_length`, block alignment, allowed pre-KEX opcodes) and blocks out-of-state packets such as pre-KEX `SSH_MSG_USERAUTH_SUCCESS` (CVE-2018-10933) or `SSH_MSG_CHANNEL_OPEN`.
+   - Parses unencrypted pre-`NEWKEYS` SSH binary packets (`packet_length`, `padding_length`, block alignment, allowed pre-KEX opcodes) and blocks out-of-state packets such as pre-KEX `SSH_MSG_USERAUTH_SUCCESS` (CVE-2018-10933), `SSH2_MSG_PING` (CVE-2025-26466), or Strict-KEX violations (Terrapin CVE-2023-48795).
    - Inspects every `SSH_MSG_KEXINIT` algorithm name-list and `SSH_MSG_DEBUG` string with [`sigil-filter`](https://crates.io/crates/sigil-filter) (~85 ns benign fast-path) to stop crafted buffer-overflow, command-injection, or control-byte payloads before forwarding untouched raw bytes to real `sshd`.
 
 3. **Per-Category Configurable Defense Policies (`bruteforce_action` / `cve_exploit_action` / `scanner_action`)**
@@ -27,41 +53,13 @@ Mirage sits in front of your real OpenSSH `sshd` (e.g., Mirage on `0.0.0.0:22` -
 
 ---
 
-## Quick Start
-
-### 1. Move real OpenSSH `sshd` to loopback
-
-```sshconfig
-# /etc/ssh/sshd_config.d/99-mirage-upstream.conf
-ListenAddress 127.0.0.1:22022
-```
-
-```bash
-sudo sshd -t && sudo systemctl reload ssh
-```
-
-### 2. Build & Run Mirage Frontline Shield
-
-```bash
-cargo build --release --workspace
-sudo ./target/release/mirage-daemon --bind 0.0.0.0:22 --upstream-sshd 127.0.0.1:22022
-```
-
-Or use the deployment script:
-
-```bash
-sudo ./mirage.sh deploy
-```
-
----
-
 ## Workspace Structure
 
 ```text
 Mirage/
 ├── crates/
-│   ├── mirage-core   # Configuration, sigil-filter integration, persona & fake-shell sink
-│   ├── mirage-ssh    # Frontline SSH reverse proxy, RFC 4253 & KEXINIT inspector, Endlessh tarpit
+│   ├── mirage-core   # Configuration, O(1) anti-CC/ban guard, sigil-filter integration, persona & fake-shell sink
+│   ├── mirage-ssh    # Frontline SSH reverse proxy, RFC 4253 & KEXINIT inspector, Endlessh tarpit, SSH-2 honeypot
 │   └── mirage-bin    # `mirage-daemon` CLI & systemd entrypoint
 ├── config.example.toml
 └── mirage.sh
