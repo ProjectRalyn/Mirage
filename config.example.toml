@@ -1,0 +1,83 @@
+# MiragePot Configuration Example
+# Pre-generated deception payloads rotate automatically every `rotation_interval_secs`.
+rotation_interval_secs = 300
+persona_slots = 16
+master_seed = 5569087846241357903
+max_tarpit_connections = 1024
+tarpit_drip_bytes_per_sec = 256
+canary_webhook_url = "https://canary.internal.example.com/alert"
+
+[admin]
+enabled = true
+# Set to "auto" to generate a 36-char random secret URL prefix at startup (e.g. /_m_9f4b2c8e1a7d3065b8e2f1c4a9d0731e)
+# Or configure any custom long secret URL prefix so scanners can never probe your telemetry panel:
+path_prefix = "/__ops_telemetry_9f8a7c2e1b4d603f5a1c8e9d2b7410a9"
+# Optional header `X-Mirage-Token` required to access the admin status/rotate endpoints
+# secret_token = "change_me_to_a_long_random_token"
+
+[sigil]
+# `sigil-filter` zero-allocation heuristic attack recognizer (~85ns benign short-circuit across 12 attack categories)
+enabled = true
+min_confidence = 0.55
+overflow_warn_len = 2048
+overflow_crit_len = 8192
+inspect_headers = true
+inspect_ssh_banners = true
+
+[http]
+# Supported modes:
+#   - "standalone"        : Standalone HTTP honeypot
+#   - "frontline_proxy"   : Sit in FRONT of your real backend (`upstream_http_url`), trapping attacks & proxying normal traffic
+#   - "behind_proxy_sink" : Sit BEHIND Nginx/Caddy/WAF, trapping 100% of diverted suspicious requests (with `sink_fallback_trap`)
+mode = "standalone"
+bind_addr = "0.0.0.0:8080"
+# Used when mode = "frontline_proxy":
+# upstream_http_url = "http://127.0.0.1:3000"
+# Used when mode = "behind_proxy_sink" ("api_debug" | "wordpress_login" | "sqli_error" | "dotenv" | "tarpit_stream"):
+sink_fallback_trap = "api_debug"
+real_ip_header = "x-real-ip"
+# Optional WAF/Nginx ingress secret header in behind_proxy_sink mode:
+# required_ingress_header = "X-Mirage-Sink: replace_with_shared_secret"
+
+enable_wordpress_trap = true
+enable_secret_leak_trap = true
+enable_sqli_trap = true
+enable_api_trap = true
+enable_tarpit_archives = true
+fake_archive_size_bytes = 268435456
+sqli_time_delay_ms = 2500
+custom_wordpress_paths = ["/wp-login.php", "/wp-admin", "/wp-json", "/xmlrpc.php", "/wp-content/debug.log", "/wp-config.php.bak"]
+custom_secret_paths = ["/.env", "/.git/config", "/.git/HEAD", "/actuator/env", "/phpinfo.php"]
+custom_api_debug_paths = ["/api/v1/debug", "/api/debug", "/admin/debug", "/_debug"]
+custom_tarpit_suffixes = ["/heapdump", ".sql.gz", ".sql", "/backup.zip", "/backup.tar.gz"]
+scanner_user_agents = ["sqlmap", "nuclei", "nikto", "dirsearch", "gobuster", "feroxbuster", "ffuf", "masscan", "zgrab", "wpscan"]
+
+[ssh]
+# Supported daemon modes:
+#   - "standalone"      : Standalone SSH-2 honeypot
+#   - "frontline_proxy" : Sit in FRONT of real OpenSSH (`upstream_sshd_addr`), forwarding trusted IPs / secret banners
+# (For native OpenSSH `.so` integration without moving port 22, mount `libpam_mirage.so` in /etc/pam.d/sshd + `mirage-fake-shell`)
+mode = "standalone"
+bind_addr = "0.0.0.0:2222"
+# upstream_sshd_addr = "127.0.0.1:22022"
+trusted_client_ips = []
+# upstream_bypass_banner_substr = "CorpBastion-9f4b"
+proxy_non_scanners_to_upstream = false
+scanner_ssh_banners = ["masscan", "zgrab", "libssh2", "paramiko", "go-ssh", "SSH-2.0-Go"]
+endlessh_tarpit_for_scanners = false
+endlessh_drip_interval_ms = 4000
+accept_password_on_attempt = 3
+auth_fail_delay_ms = 1200
+simulate_cve_banners = true
+
+[redis]
+enabled = true
+bind_addr = "0.0.0.0:16379"
+accept_auth_on_attempt = 2
+auth_fail_delay_ms = 800
+
+[postgres]
+enabled = true
+bind_addr = "0.0.0.0:15432"
+accept_auth_on_attempt = 2
+auth_fail_delay_ms = 900

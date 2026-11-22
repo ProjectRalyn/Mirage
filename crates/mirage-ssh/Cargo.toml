@@ -1,0 +1,19 @@
+[package]
+name = "mirage-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mirage-core = { path = "../mirage-core" }
+tokio.workspace = true
+bytes.workspace = true
+rand.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+aes.workspace = true
+ctr.workspace = true
+cipher.workspace = true
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true

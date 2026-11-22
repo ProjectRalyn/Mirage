@@ -1,0 +1,22 @@
+[package]
+name = "mirage-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mirage-core = { path = "../mirage-core" }
+tokio.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+tower.workspace = true
+tower-layer.workspace = true
+tower-service.workspace = true
+axum.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+futures-core.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
