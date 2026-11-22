@@ -1,27 +1,32 @@
-use aes::Aes128;
+use aes::{Aes128, Aes256};
+use base64::Engine as _;
 use cipher::{KeyIvInit, StreamCipher};
 use ctr::Ctr128BE;
 use ed25519_dalek::{Signer, SigningKey};
 use hmac::{Hmac, Mac};
 use mirage_deception::{FakeShellSession, MirageEngine, PrebakedPersona, SshAuthDecision};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::io;
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
 
 type Aes128Ctr = Ctr128BE<Aes128>;
+type Aes256Ctr = Ctr128BE<Aes256>;
 type HmacSha256 = Hmac<Sha256>;
+type HmacSha512 = Hmac<Sha512>;
 
 const SSH_MSG_DISCONNECT: u8 = 1;
 const SSH_MSG_IGNORE: u8 = 2;
 const SSH_MSG_UNIMPLEMENTED: u8 = 3;
+const SSH_MSG_DEBUG: u8 = 4;
 const SSH_MSG_SERVICE_REQUEST: u8 = 5;
 const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
+const SSH_MSG_EXT_INFO: u8 = 7;
 const SSH_MSG_KEXINIT: u8 = 20;
 const SSH_MSG_NEWKEYS: u8 = 21;
 const SSH_MSG_KEX_ECDH_INIT: u8 = 30;
@@ -30,12 +35,12 @@ const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
 const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
 const SSH_MSG_USERAUTH_FAILURE: u8 = 51;
 const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
-const SSH_MSG_USERAUTH_BANNER: u8 = 53;
 
 const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
 const SSH_MSG_REQUEST_FAILURE: u8 = 82;
 const SSH_MSG_CHANNEL_OPEN: u8 = 90;
 const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
+const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
 const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
 const SSH_MSG_CHANNEL_DATA: u8 = 94;
 const SSH_MSG_CHANNEL_EOF: u8 = 96;
@@ -43,12 +48,89 @@ const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
 const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
 const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
 const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
+const SSH2_MSG_PING: u8 = 192;
+
+const MAX_AUTH_TRIES: u32 = 6;
+const MAX_LINE_LEN: usize = 1024;
+const MAX_SHELL_COMMANDS_PER_SESSION: usize = 256;
+
+enum CipherKind {
+    Aes128(Aes128Ctr),
+    Aes256(Aes256Ctr),
+}
+
+impl CipherKind {
+    fn apply(&mut self, buf: &mut [u8]) {
+        match self {
+            Self::Aes128(c) => c.apply_keystream(buf),
+            Self::Aes256(c) => c.apply_keystream(buf),
+        }
+    }
+}
+
+enum MacKind {
+    Sha256([u8; 32]),
+    Sha512([u8; 64]),
+}
+
+impl MacKind {
+    fn tag_len(&self) -> usize {
+        match self {
+            Self::Sha256(_) => 32,
+            Self::Sha512(_) => 64,
+        }
+    }
+
+    fn verify(&self, seq: u32, pkt: &[u8], tag: &[u8]) -> bool {
+        match self {
+            Self::Sha256(key) => {
+                let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-256 key");
+                mac.update(&seq.to_be_bytes());
+                mac.update(pkt);
+                mac.verify_slice(tag).is_ok()
+            }
+            Self::Sha512(key) => {
+                let mut mac = HmacSha512::new_from_slice(key).expect("HMAC-512 key");
+                mac.update(&seq.to_be_bytes());
+                mac.update(pkt);
+                mac.verify_slice(tag).is_ok()
+            }
+        }
+    }
+
+    fn sign(&self, seq: u32, pkt: &[u8], out: &mut Vec<u8>) {
+        match self {
+            Self::Sha256(key) => {
+                let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-256 key");
+                mac.update(&seq.to_be_bytes());
+                mac.update(pkt);
+                out.extend_from_slice(&mac.finalize().into_bytes());
+            }
+            Self::Sha512(key) => {
+                let mut mac = HmacSha512::new_from_slice(key).expect("HMAC-512 key");
+                mac.update(&seq.to_be_bytes());
+                mac.update(pkt);
+                out.extend_from_slice(&mac.finalize().into_bytes());
+            }
+        }
+    }
+}
 
 struct ActiveCipherState {
-    c2s_cipher: Aes128Ctr,
-    s2c_cipher: Aes128Ctr,
-    c2s_mac_key: [u8; 32],
-    s2c_mac_key: [u8; 32],
+    c2s_cipher: CipherKind,
+    s2c_cipher: CipherKind,
+    c2s_mac: MacKind,
+    s2c_mac: MacKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NegotiatedAlgos {
+    c2s_aes256: bool,
+    s2c_aes256: bool,
+    c2s_sha512: bool,
+    s2c_sha512: bool,
+    client_wants_ext_info: bool,
+    strict_kex: bool,
 }
 
 struct SshPacketCodec<S> {
@@ -68,12 +150,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SshPacketCodec<S> {
         }
     }
 
+    async fn read_packet_with_timeout(&mut self, timeout: Duration) -> io::Result<Vec<u8>> {
+        match tokio::time::timeout(timeout, self.read_packet()).await {
+            Ok(res) => res,
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "honeypot SSH session read timeout",
+            )),
+        }
+    }
+
     async fn read_packet(&mut self) -> io::Result<Vec<u8>> {
         if let Some(cs) = self.cipher_state.as_mut() {
-            // Encrypted packet (aes128-ctr + hmac-sha2-256)
             let mut first_block = [0u8; 16];
             self.stream.read_exact(&mut first_block).await?;
-            cs.c2s_cipher.apply_keystream(&mut first_block);
+            cs.c2s_cipher.apply(&mut first_block);
 
             let pkt_len = u32::from_be_bytes([
                 first_block[0],
@@ -101,19 +192,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SshPacketCodec<S> {
             full_pkt[..16].copy_from_slice(&first_block);
             if total_len > 16 {
                 self.stream.read_exact(&mut full_pkt[16..]).await?;
-                cs.c2s_cipher.apply_keystream(&mut full_pkt[16..]);
+                cs.c2s_cipher.apply(&mut full_pkt[16..]);
             }
 
-            let mut received_mac = [0u8; 32];
-            self.stream.read_exact(&mut received_mac).await?;
+            let tag_len = cs.c2s_mac.tag_len();
+            let mut received_mac = [0u8; 64];
+            self.stream.read_exact(&mut received_mac[..tag_len]).await?;
 
-            // Verify HMAC-SHA2-256(seq || plaintext_packet)
-            let mut mac =
-                HmacSha256::new_from_slice(&cs.c2s_mac_key).expect("HMAC accepts 32-byte key");
-            mac.update(&self.c2s_seq.to_be_bytes());
-            mac.update(&full_pkt);
-            mac.verify_slice(&received_mac)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "SSH HMAC mismatch"))?;
+            if !cs
+                .c2s_mac
+                .verify(self.c2s_seq, &full_pkt, &received_mac[..tag_len])
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SSH HMAC mismatch",
+                ));
+            }
 
             self.c2s_seq = self.c2s_seq.wrapping_add(1);
 
@@ -127,7 +221,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SshPacketCodec<S> {
             let payload_end = 5 + (pkt_len - 1 - pad_len);
             Ok(full_pkt[5..payload_end].to_vec())
         } else {
-            // Unencrypted packet
             let mut len_buf = [0u8; 4];
             self.stream.read_exact(&mut len_buf).await?;
             let pkt_len = u32::from_be_bytes(len_buf) as usize;
@@ -162,7 +255,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SshPacketCodec<S> {
         }
         let pkt_len = 1 + payload.len() + pad_len;
 
-        let mut raw_pkt = Vec::with_capacity(4 + pkt_len + 32);
+        let mut raw_pkt = Vec::with_capacity(4 + pkt_len + 64);
         raw_pkt.extend_from_slice(&(pkt_len as u32).to_be_bytes());
         raw_pkt.push(pad_len as u8);
         raw_pkt.extend_from_slice(payload);
@@ -172,13 +265,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SshPacketCodec<S> {
         raw_pkt.extend_from_slice(&pad_bytes);
 
         if let Some(cs) = self.cipher_state.as_mut() {
-            let mut mac =
-                HmacSha256::new_from_slice(&cs.s2c_mac_key).expect("HMAC accepts 32-byte key");
-            mac.update(&self.s2c_seq.to_be_bytes());
-            mac.update(&raw_pkt);
-            let tag = mac.finalize().into_bytes();
-
-            cs.s2c_cipher.apply_keystream(&mut raw_pkt);
+            let mut tag = Vec::with_capacity(64);
+            cs.s2c_mac.sign(self.s2c_seq, &raw_pkt, &mut tag);
+            cs.s2c_cipher.apply(&mut raw_pkt);
             raw_pkt.extend_from_slice(&tag);
         }
 
@@ -188,8 +277,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SshPacketCodec<S> {
     }
 }
 
-/// Run a complete SSH-2 deception session over `stream` after the client identification banner
-/// (`client_banner`, without trailing `\r\n`) has been read and the server banner has been sent.
+/// Run a complete, low-overhead SSH-2 deception session over `stream`.
+/// Accepts an optional `pre_read_client_kexinit` so Mirage can seamlessly divert a connection
+/// mid-handshake right after inspecting `SSH_MSG_KEXINIT` without ever touching `upstream_sshd`.
 pub async fn run_ssh2_deception_session<S>(
     stream: S,
     engine: Arc<MirageEngine>,
@@ -197,29 +287,60 @@ pub async fn run_ssh2_deception_session<S>(
     client_ip: IpAddr,
     client_banner: &str,
     server_banner: &str,
+    pre_read_client_kexinit: Option<Vec<u8>>,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut codec = SshPacketCodec::new(stream);
+    let idle_timeout = Duration::from_secs(engine.config().ssh.honeypot_idle_timeout_secs.max(10));
+    let max_duration = Duration::from_secs(engine.config().ssh.honeypot_max_duration_secs.max(30));
+    let session_start = Instant::now();
 
-    // 1. Send Server SSH_MSG_KEXINIT
+    let mut codec = SshPacketCodec::new(stream);
+    if pre_read_client_kexinit.is_some() {
+        // Account for the already-consumed first unencrypted packet in c2s_seq
+        codec.c2s_seq = 1;
+    }
+
+    // 1. Send Server SSH_MSG_KEXINIT (supporting aes128-ctr, aes256-ctr, hmac-sha2-256/512)
     let server_kexinit = build_server_kexinit();
     codec.write_packet(&server_kexinit).await?;
 
-    // 2. Read Client SSH_MSG_KEXINIT
-    let client_kexinit = loop {
-        let pkt = codec.read_packet().await?;
-        if !pkt.is_empty() && pkt[0] == SSH_MSG_KEXINIT {
-            break pkt;
+    // 2. Obtain Client SSH_MSG_KEXINIT (either pre-read during proxy inspection or read now)
+    let client_kexinit = match pre_read_client_kexinit {
+        Some(pkt) => pkt,
+        None => {
+            let mut skips = 0u8;
+            loop {
+                let pkt = codec.read_packet_with_timeout(idle_timeout).await?;
+                if !pkt.is_empty() && pkt[0] == SSH_MSG_KEXINIT {
+                    break pkt;
+                }
+                skips += 1;
+                if skips > 4 {
+                    return Ok(());
+                }
+            }
         }
     };
 
+    let negotiated = negotiate_algos(&client_kexinit);
+
     // 3. Read Client SSH_MSG_KEX_ECDH_INIT (opcode 30)
-    let ecdh_init = loop {
-        let pkt = codec.read_packet().await?;
-        if !pkt.is_empty() && pkt[0] == SSH_MSG_KEX_ECDH_INIT {
-            break pkt;
+    let ecdh_init = {
+        let mut skips = 0u8;
+        loop {
+            let pkt = codec.read_packet_with_timeout(idle_timeout).await?;
+            if !pkt.is_empty() && pkt[0] == SSH_MSG_KEX_ECDH_INIT {
+                break pkt;
+            }
+            if !pkt.is_empty() && pkt[0] == SSH_MSG_DISCONNECT {
+                return Ok(());
+            }
+            skips += 1;
+            if skips > 4 {
+                return Ok(());
+            }
         }
     };
 
@@ -242,14 +363,13 @@ where
     let q_s = X25519PublicKey::from(&server_secret);
     let shared_secret = server_secret.diffie_hellman(&q_c);
 
-    // 5. Build Server Ed25519 Host Key blob K_S from the persona's rotating seed
-    let host_signing_key = SigningKey::from_bytes(&persona.host_key_seed);
+    // 5. Build stable Server Ed25519 Host Key blob K_S (consistent across reconnects)
+    let host_signing_key = SigningKey::from_bytes(&engine.honeypot_host_key_seed());
     let host_verifying_key = host_signing_key.verifying_key();
     let mut k_s = Vec::with_capacity(51);
     write_ssh_string(&mut k_s, b"ssh-ed25519");
     write_ssh_string(&mut k_s, host_verifying_key.as_bytes());
 
-    // Encode shared secret K as SSH mpint
     let mut k_mpint = Vec::with_capacity(37);
     write_ssh_mpint(&mut k_mpint, shared_secret.as_bytes());
 
@@ -271,7 +391,7 @@ where
     write_ssh_string(&mut sig_blob, b"ssh-ed25519");
     write_ssh_string(&mut sig_blob, &sig.to_bytes());
 
-    // 8. Send SSH_MSG_KEX_ECDH_REPLY (opcode 31) and SSH_MSG_NEWKEYS (opcode 21)
+    // 8. Send SSH_MSG_KEX_ECDH_REPLY and SSH_MSG_NEWKEYS
     let mut reply = Vec::with_capacity(200);
     reply.push(SSH_MSG_KEX_ECDH_REPLY);
     write_ssh_string(&mut reply, &k_s);
@@ -279,45 +399,130 @@ where
     write_ssh_string(&mut reply, &sig_blob);
     codec.write_packet(&reply).await?;
     codec.write_packet(&[SSH_MSG_NEWKEYS]).await?;
+    if negotiated.strict_kex {
+        codec.s2c_seq = 0;
+    }
 
     // 9. Wait for Client SSH_MSG_NEWKEYS
-    loop {
-        let pkt = codec.read_packet().await?;
-        if !pkt.is_empty() && pkt[0] == SSH_MSG_NEWKEYS {
-            break;
+    {
+        let mut skips = 0u8;
+        loop {
+            let pkt = codec.read_packet_with_timeout(idle_timeout).await?;
+            if !pkt.is_empty() && pkt[0] == SSH_MSG_NEWKEYS {
+                if negotiated.strict_kex {
+                    codec.c2s_seq = 0;
+                }
+                break;
+            }
+            if !pkt.is_empty() && pkt[0] == SSH_MSG_DISCONNECT {
+                return Ok(());
+            }
+            skips += 1;
+            if skips > 4 {
+                return Ok(());
+            }
         }
     }
 
-    // 10. Derive RFC 4253 §7.2 Session Keys (session_id == exchange_hash_h for first KEX)
+    // 10. Derive RFC 4253 §7.2 Session Keys for negotiated ciphers & MACs
     let session_id = exchange_hash_h;
-    let iv_c2s = derive_ssh_key(&k_mpint, &exchange_hash_h, b'A', &session_id);
-    let iv_s2c = derive_ssh_key(&k_mpint, &exchange_hash_h, b'B', &session_id);
-    let key_c2s = derive_ssh_key(&k_mpint, &exchange_hash_h, b'C', &session_id);
-    let key_s2c = derive_ssh_key(&k_mpint, &exchange_hash_h, b'D', &session_id);
-    let mac_c2s = derive_ssh_key(&k_mpint, &exchange_hash_h, b'E', &session_id);
-    let mac_s2c = derive_ssh_key(&k_mpint, &exchange_hash_h, b'F', &session_id);
+    let iv_c2s = derive_ssh_key_ext(&k_mpint, &exchange_hash_h, b'A', &session_id, 16);
+    let iv_s2c = derive_ssh_key_ext(&k_mpint, &exchange_hash_h, b'B', &session_id, 16);
+    let key_c2s = derive_ssh_key_ext(
+        &k_mpint,
+        &exchange_hash_h,
+        b'C',
+        &session_id,
+        if negotiated.c2s_aes256 { 32 } else { 16 },
+    );
+    let key_s2c = derive_ssh_key_ext(
+        &k_mpint,
+        &exchange_hash_h,
+        b'D',
+        &session_id,
+        if negotiated.s2c_aes256 { 32 } else { 16 },
+    );
+    let mac_c2s_bytes = derive_ssh_key_ext(
+        &k_mpint,
+        &exchange_hash_h,
+        b'E',
+        &session_id,
+        if negotiated.c2s_sha512 { 64 } else { 32 },
+    );
+    let mac_s2c_bytes = derive_ssh_key_ext(
+        &k_mpint,
+        &exchange_hash_h,
+        b'F',
+        &session_id,
+        if negotiated.s2c_sha512 { 64 } else { 32 },
+    );
 
-    let c2s_cipher = Aes128Ctr::new(key_c2s[..16].into(), iv_c2s[..16].into());
-    let s2c_cipher = Aes128Ctr::new(key_s2c[..16].into(), iv_s2c[..16].into());
+    let c2s_cipher = if negotiated.c2s_aes256 {
+        CipherKind::Aes256(Aes256Ctr::new(key_c2s[..32].into(), iv_c2s[..16].into()))
+    } else {
+        CipherKind::Aes128(Aes128Ctr::new(key_c2s[..16].into(), iv_c2s[..16].into()))
+    };
+    let s2c_cipher = if negotiated.s2c_aes256 {
+        CipherKind::Aes256(Aes256Ctr::new(key_s2c[..32].into(), iv_s2c[..16].into()))
+    } else {
+        CipherKind::Aes128(Aes128Ctr::new(key_s2c[..16].into(), iv_s2c[..16].into()))
+    };
+    let c2s_mac = if negotiated.c2s_sha512 {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&mac_c2s_bytes[..64]);
+        MacKind::Sha512(arr)
+    } else {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&mac_c2s_bytes[..32]);
+        MacKind::Sha256(arr)
+    };
+    let s2c_mac = if negotiated.s2c_sha512 {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&mac_s2c_bytes[..64]);
+        MacKind::Sha512(arr)
+    } else {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&mac_s2c_bytes[..32]);
+        MacKind::Sha256(arr)
+    };
 
     codec.cipher_state = Some(ActiveCipherState {
         c2s_cipher,
         s2c_cipher,
-        c2s_mac_key: mac_c2s,
-        s2c_mac_key: mac_s2c,
+        c2s_mac,
+        s2c_mac,
     });
 
-    // 11. Encrypted SSH-2 Authentication & Channel Loop
+    // Send authentic RFC 8308 SSH_MSG_EXT_INFO if client requested ext-info-c
+    if negotiated.client_wants_ext_info {
+        let mut ext = Vec::with_capacity(96);
+        ext.push(SSH_MSG_EXT_INFO);
+        ext.extend_from_slice(&1u32.to_be_bytes());
+        write_ssh_string(&mut ext, b"server-sig-algs");
+        write_ssh_string(
+            &mut ext,
+            b"ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256",
+        );
+        codec.write_packet(&ext).await?;
+    }
+
+    // 11. Encrypted SSH-2 Authentication & Channel Loop (strictly bounded against CC/DoS)
     let mut authenticated_user: Option<String> = None;
-    let mut banner_sent = false;
+    let mut auth_failures: u32 = 0;
+    let mut ping_count: u8 = 0;
     let mut shell_session: Option<FakeShellSession> = None;
     let mut client_channel_id: u32 = 0;
     let mut line_buffer = String::new();
     let mut esc_state: u8 = 0;
     let mut history_cursor: usize = 0;
+    let mut last_was_cr = false;
+    let mut commands_executed: usize = 0;
 
     loop {
-        let pkt = codec.read_packet().await?;
+        if session_start.elapsed() >= max_duration {
+            return Ok(());
+        }
+        let pkt = codec.read_packet_with_timeout(idle_timeout).await?;
         if pkt.is_empty() {
             continue;
         }
@@ -326,7 +531,14 @@ where
 
         match msg_type {
             SSH_MSG_DISCONNECT => return Ok(()),
-            SSH_MSG_IGNORE | SSH_MSG_CHANNEL_WINDOW_ADJUST => {}
+            SSH_MSG_IGNORE | SSH_MSG_DEBUG | SSH_MSG_CHANNEL_WINDOW_ADJUST => {}
+            // Safely absorb CVE-2025-26466 SSH2_MSG_PING floods with zero memory allocation
+            SSH2_MSG_PING => {
+                ping_count = ping_count.saturating_add(1);
+                if ping_count > 3 {
+                    return Ok(());
+                }
+            }
             SSH_MSG_SERVICE_REQUEST => {
                 let service_name = r.read_string()?;
                 let mut accept = Vec::with_capacity(1 + 4 + service_name.len());
@@ -334,15 +546,14 @@ where
                 write_ssh_string(&mut accept, service_name.as_bytes());
                 codec.write_packet(&accept).await?;
             }
-            // CVE-2018-10933 libssh Authentication Bypass Trap!
-            // If an attacker sends SSH_MSG_USERAUTH_SUCCESS (52) instead of USERAUTH_REQUEST (50):
+            // CVE-2018-10933 libssh Authentication Bypass Trap
             SSH_MSG_USERAUTH_SUCCESS if authenticated_user.is_none() => {
                 engine.record_event(
                     client_ip,
                     &persona,
-                    "SSH",
+                    "SSH-HONEYPOT",
                     "CVE-2018-10933-AuthBypassTrap",
-                    "Attacker sent client-side SSH_MSG_USERAUTH_SUCCESS exploit packet; granting fake shell access",
+                    "Client sent unauthenticated SSH_MSG_USERAUTH_SUCCESS; trapping in fake shell",
                 );
                 engine
                     .metrics
@@ -355,19 +566,6 @@ where
                 let _service = r.read_string()?;
                 let method = r.read_string()?;
 
-                if !banner_sent {
-                    banner_sent = true;
-                    let pre_auth_banner = format!(
-                        "\r\n*** {} Production Cluster Node ({}) ***\r\n*** Notice: PAM hardware key daemon degraded; temporary password fallback active ***\r\n\r\n",
-                        persona.hostname, persona.ssh_cve_profile
-                    );
-                    let mut b_pkt = Vec::new();
-                    b_pkt.push(SSH_MSG_USERAUTH_BANNER);
-                    write_ssh_string(&mut b_pkt, pre_auth_banner.as_bytes());
-                    write_ssh_string(&mut b_pkt, b"en");
-                    codec.write_packet(&b_pkt).await?;
-                }
-
                 match method.as_str() {
                     "password" => {
                         let _change_pass = r.read_u8()?;
@@ -379,24 +577,51 @@ where
                                 codec.write_packet(&[SSH_MSG_USERAUTH_SUCCESS]).await?;
                             }
                             SshAuthDecision::RejectAfterDelay { delay_ms, .. } => {
+                                auth_failures += 1;
                                 if delay_ms > 0 {
                                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                                 }
-                                let mut fail = Vec::new();
-                                fail.push(SSH_MSG_USERAUTH_FAILURE);
-                                write_ssh_string(&mut fail, b"password");
-                                fail.push(0);
-                                codec.write_packet(&fail).await?;
+                                if auth_failures >= MAX_AUTH_TRIES {
+                                    send_disconnect(
+                                        &mut codec,
+                                        2,
+                                        "Too many authentication failures",
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
+                                send_auth_failure(&mut codec, b"publickey,password").await?;
                             }
                         }
                     }
+                    "publickey" => {
+                        // Log attempted attacker public key fingerprint as threat intel
+                        let has_sig = r.read_u8().unwrap_or(0) != 0;
+                        if let (Ok(algo), Ok(blob)) = (r.read_string(), r.read_bytes()) {
+                            let fp = base64::engine::general_purpose::STANDARD_NO_PAD
+                                .encode(Sha256::digest(blob));
+                            engine.record_event(
+                                client_ip,
+                                &persona,
+                                "SSH-HONEYPOT",
+                                "PublicKeyProbe",
+                                format!(
+                                    "user='{username}' algo='{algo}' signed={has_sig} fp=SHA256:{fp}"
+                                ),
+                            );
+                        }
+                        if has_sig {
+                            auth_failures += 1;
+                            if auth_failures >= MAX_AUTH_TRIES {
+                                send_disconnect(&mut codec, 2, "Too many authentication failures")
+                                    .await?;
+                                return Ok(());
+                            }
+                        }
+                        send_auth_failure(&mut codec, b"publickey,password").await?;
+                    }
                     _ => {
-                        // Reject 'none' or 'publickey' and advertise 'password' so client prompts for password
-                        let mut fail = Vec::new();
-                        fail.push(SSH_MSG_USERAUTH_FAILURE);
-                        write_ssh_string(&mut fail, b"password");
-                        fail.push(0);
-                        codec.write_packet(&fail).await?;
+                        send_auth_failure(&mut codec, b"publickey,password").await?;
                     }
                 }
             }
@@ -408,21 +633,53 @@ where
                 }
             }
             SSH_MSG_CHANNEL_OPEN => {
-                let _chan_type = r.read_string()?;
+                if authenticated_user.is_none() {
+                    return Ok(());
+                }
+                let chan_type = r.read_string()?;
                 let sender_channel = r.read_u32()?;
                 let _initial_window = r.read_u32()?;
                 let _max_pkt_size = r.read_u32()?;
-                client_channel_id = sender_channel;
 
+                if chan_type != "session" {
+                    // Capture port-forwarding / direct-tcpip pivoting attempts and reject cleanly
+                    let detail = if chan_type == "direct-tcpip" {
+                        let host = r.read_string().unwrap_or_default();
+                        let port = r.read_u32().unwrap_or(0);
+                        format!("direct-tcpip target={host}:{port}")
+                    } else {
+                        format!("channel_type={chan_type}")
+                    };
+                    engine.record_event(
+                        client_ip,
+                        &persona,
+                        "SSH-HONEYPOT",
+                        "PortForwardingAttemptBlocked",
+                        detail,
+                    );
+                    let mut fail = Vec::with_capacity(48);
+                    fail.push(SSH_MSG_CHANNEL_OPEN_FAILURE);
+                    fail.extend_from_slice(&sender_channel.to_be_bytes());
+                    fail.extend_from_slice(&1u32.to_be_bytes()); // ADMINISTRATIVELY_PROHIBITED
+                    write_ssh_string(&mut fail, b"open failed");
+                    write_ssh_string(&mut fail, b"");
+                    codec.write_packet(&fail).await?;
+                    continue;
+                }
+
+                client_channel_id = sender_channel;
                 let mut confirm = Vec::with_capacity(17);
                 confirm.push(SSH_MSG_CHANNEL_OPEN_CONFIRMATION);
                 confirm.extend_from_slice(&client_channel_id.to_be_bytes());
-                confirm.extend_from_slice(&0u32.to_be_bytes()); // server channel id = 0
+                confirm.extend_from_slice(&0u32.to_be_bytes());
                 confirm.extend_from_slice(&(2 * 1024 * 1024u32).to_be_bytes());
                 confirm.extend_from_slice(&32768u32.to_be_bytes());
                 codec.write_packet(&confirm).await?;
             }
             SSH_MSG_CHANNEL_REQUEST => {
+                if authenticated_user.is_none() {
+                    return Ok(());
+                }
                 let _recipient_channel = r.read_u32()?;
                 let req_type = r.read_string()?;
                 let want_reply = r.read_u8()? != 0;
@@ -459,7 +716,12 @@ where
                         .await;
 
                         if !exec_res.output.is_empty() {
-                            send_channel_data(&mut codec, client_channel_id, exec_res.output.as_bytes()).await?;
+                            send_channel_data(
+                                &mut codec,
+                                client_channel_id,
+                                exec_res.output.as_bytes(),
+                            )
+                            .await?;
                         }
                         send_channel_exit_and_close(&mut codec, client_channel_id).await?;
                         return Ok(());
@@ -500,7 +762,6 @@ where
                 };
 
                 for &byte in data {
-                    // Handle ANSI escape sequences (e.g. Up/Down arrow keys `\x1b[A`, `\x1b[B`)
                     if esc_state == 1 {
                         if byte == b'[' {
                             esc_state = 2;
@@ -513,14 +774,12 @@ where
                         let hist = session.history();
                         if !hist.is_empty() {
                             if byte == b'A' {
-                                // Up arrow
                                 history_cursor = history_cursor.saturating_add(1).min(hist.len());
                                 line_buffer = hist[hist.len() - history_cursor].clone();
                                 let redraw = format!("\r\x1b[K{}{}", session.prompt(), line_buffer);
                                 send_channel_data(&mut codec, client_channel_id, redraw.as_bytes())
                                     .await?;
                             } else if byte == b'B' {
-                                // Down arrow
                                 history_cursor = history_cursor.saturating_sub(1);
                                 line_buffer = if history_cursor == 0 {
                                     String::new()
@@ -535,33 +794,54 @@ where
                         continue;
                     }
 
+                    // Swallow trailing `\n` right after `\r` so CRLF pastes don't emit duplicate prompts
+                    if byte == b'\n' && last_was_cr {
+                        last_was_cr = false;
+                        continue;
+                    }
+                    last_was_cr = byte == b'\r';
+
                     match byte {
                         0x1b => {
                             esc_state = 1;
                         }
                         b'\t' => {
-                            // Tab completion
                             if let Some(completion) = session.tab_complete(&line_buffer) {
-                                line_buffer.push_str(&completion);
-                                send_channel_data(
-                                    &mut codec,
-                                    client_channel_id,
-                                    completion.as_bytes(),
-                                )
-                                .await?;
+                                if line_buffer.len() + completion.len() <= MAX_LINE_LEN {
+                                    line_buffer.push_str(&completion);
+                                    send_channel_data(
+                                        &mut codec,
+                                        client_channel_id,
+                                        completion.as_bytes(),
+                                    )
+                                    .await?;
+                                }
                             }
                         }
                         0x0c => {
-                            // Ctrl-L (clear screen)
                             let redraw =
                                 format!("\x1b[2J\x1b[H{}{}", session.prompt(), line_buffer);
                             send_channel_data(&mut codec, client_channel_id, redraw.as_bytes())
                                 .await?;
                         }
                         0x15 => {
-                            // Ctrl-U (clear line)
                             line_buffer.clear();
                             let redraw = format!("\r\x1b[K{}", session.prompt());
+                            send_channel_data(&mut codec, client_channel_id, redraw.as_bytes())
+                                .await?;
+                        }
+                        0x17 => {
+                            // Ctrl-W (delete previous word)
+                            while line_buffer.ends_with(' ') {
+                                line_buffer.pop();
+                            }
+                            while let Some(c) = line_buffer.chars().last() {
+                                if c == ' ' {
+                                    break;
+                                }
+                                line_buffer.pop();
+                            }
+                            let redraw = format!("\r\x1b[K{}{}", session.prompt(), line_buffer);
                             send_channel_data(&mut codec, client_channel_id, redraw.as_bytes())
                                 .await?;
                         }
@@ -569,6 +849,11 @@ where
                             history_cursor = 0;
                             send_channel_data(&mut codec, client_channel_id, b"\r\n").await?;
                             let cmd_line = std::mem::take(&mut line_buffer);
+                            commands_executed += 1;
+                            if commands_executed > MAX_SHELL_COMMANDS_PER_SESSION {
+                                send_channel_exit_and_close(&mut codec, client_channel_id).await?;
+                                return Ok(());
+                            }
                             let res = run_logged_shell_command(
                                 &engine,
                                 &persona,
@@ -598,7 +883,6 @@ where
                                 .await?;
                         }
                         0x03 => {
-                            // Ctrl-C
                             history_cursor = 0;
                             line_buffer.clear();
                             let prompt = format!("^C\r\n{}", session.prompt());
@@ -606,7 +890,6 @@ where
                                 .await?;
                         }
                         0x04 => {
-                            // Ctrl-D (EOF)
                             if line_buffer.is_empty() {
                                 send_channel_data(&mut codec, client_channel_id, b"logout\r\n")
                                     .await?;
@@ -615,15 +898,16 @@ where
                             }
                         }
                         0x7f | 0x08 => {
-                            // Backspace
                             if line_buffer.pop().is_some() {
                                 send_channel_data(&mut codec, client_channel_id, b"\x08 \x08")
                                     .await?;
                             }
                         }
                         b if (0x20..=0x7e).contains(&b) => {
-                            line_buffer.push(b as char);
-                            send_channel_data(&mut codec, client_channel_id, &[b]).await?;
+                            if line_buffer.len() < MAX_LINE_LEN {
+                                line_buffer.push(b as char);
+                                send_channel_data(&mut codec, client_channel_id, &[b]).await?;
+                            }
                         }
                         _ => {}
                     }
@@ -640,6 +924,30 @@ where
             }
         }
     }
+}
+
+async fn send_auth_failure<S: AsyncRead + AsyncWrite + Unpin>(
+    codec: &mut SshPacketCodec<S>,
+    methods: &[u8],
+) -> io::Result<()> {
+    let mut fail = Vec::with_capacity(1 + 4 + methods.len() + 1);
+    fail.push(SSH_MSG_USERAUTH_FAILURE);
+    write_ssh_string(&mut fail, methods);
+    fail.push(0);
+    codec.write_packet(&fail).await
+}
+
+async fn send_disconnect<S: AsyncRead + AsyncWrite + Unpin>(
+    codec: &mut SshPacketCodec<S>,
+    reason_code: u32,
+    description: &str,
+) -> io::Result<()> {
+    let mut pkt = Vec::with_capacity(16 + description.len());
+    pkt.push(SSH_MSG_DISCONNECT);
+    pkt.extend_from_slice(&reason_code.to_be_bytes());
+    write_ssh_string(&mut pkt, description.as_bytes());
+    write_ssh_string(&mut pkt, b"");
+    codec.write_packet(&pkt).await
 }
 
 async fn run_logged_shell_command(
@@ -681,7 +989,7 @@ async fn run_logged_shell_command(
     }
 
     if res.delay_ms > 0 {
-        tokio::time::sleep(Duration::from_millis(res.delay_ms)).await;
+        tokio::time::sleep(Duration::from_millis(res.delay_ms.min(2000))).await;
     }
 
     res
@@ -703,12 +1011,11 @@ async fn send_channel_exit_and_close<S: AsyncRead + AsyncWrite + Unpin>(
     codec: &mut SshPacketCodec<S>,
     recipient_channel: u32,
 ) -> io::Result<()> {
-    // Send exit-status 0
     let mut status_pkt = Vec::with_capacity(28);
     status_pkt.push(SSH_MSG_CHANNEL_REQUEST);
     status_pkt.extend_from_slice(&recipient_channel.to_be_bytes());
     write_ssh_string(&mut status_pkt, b"exit-status");
-    status_pkt.push(0); // want_reply = false
+    status_pkt.push(0);
     status_pkt.extend_from_slice(&0u32.to_be_bytes());
     codec.write_packet(&status_pkt).await?;
 
@@ -724,40 +1031,94 @@ async fn send_channel_exit_and_close<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 fn build_server_kexinit() -> Vec<u8> {
-    let mut buf = Vec::with_capacity(256);
+    let mut buf = Vec::with_capacity(320);
     buf.push(SSH_MSG_KEXINIT);
     let mut cookie = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut cookie);
     buf.extend_from_slice(&cookie);
 
-    // 10 algorithm name-lists
-    write_ssh_string(&mut buf, b"curve25519-sha256,curve25519-sha256@libssh.org");
+    write_ssh_string(
+        &mut buf,
+        b"curve25519-sha256,curve25519-sha256@libssh.org,kex-strict-s-v00@openssh.com",
+    );
     write_ssh_string(&mut buf, b"ssh-ed25519");
-    write_ssh_string(&mut buf, b"aes128-ctr");
-    write_ssh_string(&mut buf, b"aes128-ctr");
-    write_ssh_string(&mut buf, b"hmac-sha2-256");
-    write_ssh_string(&mut buf, b"hmac-sha2-256");
+    write_ssh_string(&mut buf, b"aes128-ctr,aes256-ctr");
+    write_ssh_string(&mut buf, b"aes128-ctr,aes256-ctr");
+    write_ssh_string(&mut buf, b"hmac-sha2-256,hmac-sha2-512");
+    write_ssh_string(&mut buf, b"hmac-sha2-256,hmac-sha2-512");
     write_ssh_string(&mut buf, b"none");
     write_ssh_string(&mut buf, b"none");
     write_ssh_string(&mut buf, b"");
     write_ssh_string(&mut buf, b"");
-    buf.push(0); // first_kex_packet_follows = false
+    buf.push(0);
     buf.extend_from_slice(&0u32.to_be_bytes());
     buf
 }
 
-fn derive_ssh_key(
+fn negotiate_algos(client_kexinit: &[u8]) -> NegotiatedAlgos {
+    let mut out = NegotiatedAlgos {
+        c2s_aes256: false,
+        s2c_aes256: false,
+        c2s_sha512: false,
+        s2c_sha512: false,
+        client_wants_ext_info: false,
+        strict_kex: false,
+    };
+    if client_kexinit.len() < 17 {
+        return out;
+    }
+    let mut r = SshReader::new(&client_kexinit[17..]);
+    let lists: Vec<String> = (0..6)
+        .filter_map(|_| r.read_string().ok())
+        .collect();
+    if lists.len() < 6 {
+        return out;
+    }
+    out.client_wants_ext_info = lists[0].split(',').any(|a| a == "ext-info-c");
+    out.strict_kex = lists[0]
+        .split(',')
+        .any(|a| a == "kex-strict-c-v00@openssh.com");
+    out.c2s_aes256 = pick_first(&lists[2], &["aes128-ctr", "aes256-ctr"]) == Some("aes256-ctr");
+    out.s2c_aes256 = pick_first(&lists[3], &["aes128-ctr", "aes256-ctr"]) == Some("aes256-ctr");
+    out.c2s_sha512 =
+        pick_first(&lists[4], &["hmac-sha2-256", "hmac-sha2-512"]) == Some("hmac-sha2-512");
+    out.s2c_sha512 =
+        pick_first(&lists[5], &["hmac-sha2-256", "hmac-sha2-512"]) == Some("hmac-sha2-512");
+    out
+}
+
+fn pick_first<'a>(client_list: &str, supported: &[&'a str]) -> Option<&'a str> {
+    for c in client_list.split(',') {
+        if let Some(&m) = supported.iter().find(|&&s| s == c) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn derive_ssh_key_ext(
     k_mpint: &[u8],
     exchange_hash_h: &[u8; 32],
     letter: u8,
     session_id: &[u8; 32],
-) -> [u8; 32] {
+    needed_len: usize,
+) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(k_mpint);
     hasher.update(exchange_hash_h);
     hasher.update([letter]);
     hasher.update(session_id);
-    hasher.finalize().into()
+    let mut key = hasher.finalize().to_vec();
+
+    while key.len() < needed_len {
+        let mut ext = Sha256::new();
+        ext.update(k_mpint);
+        ext.update(exchange_hash_h);
+        ext.update(&key);
+        key.extend_from_slice(&ext.finalize());
+    }
+    key.truncate(needed_len);
+    key
 }
 
 fn write_ssh_string(buf: &mut Vec<u8>, data: &[u8]) {

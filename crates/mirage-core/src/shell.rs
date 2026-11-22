@@ -669,19 +669,174 @@ impl FakeShellSession {
                     should_exit: false,
                 }
             }
-            "uptime" => ShellExecResult {
-                output: " 14:55:02 up 41 days, 18:12,  1 user,  load average: 1.42, 1.38, 1.29"
-                    .to_string(),
-                delay_ms: 30,
-                captured_indicators: Vec::new(),
-                should_exit: false,
-            },
+            "uptime" => {
+                let (_, h, m, s) = current_utc_hms();
+                ShellExecResult {
+                    output: format!(
+                        " {h:02}:{m:02}:{s:02} up 41 days, 18:12,  1 user,  load average: 1.42, 1.38, 1.29"
+                    ),
+                    delay_ms: 30,
+                    captured_indicators: Vec::new(),
+                    should_exit: false,
+                }
+            }
             "date" => ShellExecResult {
-                output: "Sun Nov 22 14:55:02 UTC 2026".to_string(),
+                output: format_current_utc_date(),
                 delay_ms: 20,
                 captured_indicators: Vec::new(),
                 should_exit: false,
             },
+            "nproc" => ShellExecResult {
+                output: "64".to_string(),
+                delay_ms: 15,
+                captured_indicators: Vec::new(),
+                should_exit: false,
+            },
+            "arch" => ShellExecResult {
+                output: "x86_64".to_string(),
+                delay_ms: 15,
+                captured_indicators: Vec::new(),
+                should_exit: false,
+            },
+            "ulimit" => ShellExecResult {
+                output: if args.iter().any(|&a| a == "-n") {
+                    "65536".to_string()
+                } else {
+                    "unlimited".to_string()
+                },
+                delay_ms: 15,
+                captured_indicators: Vec::new(),
+                should_exit: false,
+            },
+            "umask" => ShellExecResult {
+                output: "0022".to_string(),
+                delay_ms: 15,
+                captured_indicators: Vec::new(),
+                should_exit: false,
+            },
+            "unset" | "alias" | "type" | "sleep" => ShellExecResult {
+                output: String::new(),
+                delay_ms: if prog == "sleep" { 250 } else { 15 },
+                captured_indicators: Vec::new(),
+                should_exit: false,
+            },
+            "passwd" | "chpasswd" => ShellExecResult {
+                output: if prog == "chpasswd" {
+                    "chpasswd: Permission denied.".to_string()
+                } else {
+                    "Changing password for user.\npasswd: Authentication token manipulation error"
+                        .to_string()
+                },
+                delay_ms: 600,
+                captured_indicators: vec![format!("credential_change_attempt:{cmd_line}")],
+                should_exit: false,
+            },
+            "cut" => {
+                let input = stdin_input.unwrap_or("");
+                let mut delim = '\t';
+                let mut field_1based: usize = 1;
+                let mut i = 0;
+                while i < args.len() {
+                    if let Some(d) = args[i].strip_prefix("-d") {
+                        if let Some(ch) = d.chars().next() {
+                            delim = ch;
+                        } else if let Some(next) = args.get(i + 1).and_then(|s| s.chars().next()) {
+                            delim = next;
+                            i += 1;
+                        }
+                    } else if let Some(f) = args[i].strip_prefix("-f") {
+                        let f_str = if !f.is_empty() {
+                            f
+                        } else {
+                            i += 1;
+                            args.get(i).copied().unwrap_or("1")
+                        };
+                        if let Ok(n) = f_str.split(&[',', '-'][..]).next().unwrap_or("1").parse() {
+                            field_1based = n;
+                        }
+                    }
+                    i += 1;
+                }
+                let out: Vec<String> = input
+                    .lines()
+                    .map(|line| {
+                        line.split(delim)
+                            .nth(field_1based.saturating_sub(1))
+                            .unwrap_or("")
+                            .to_string()
+                    })
+                    .collect();
+                ShellExecResult {
+                    output: out.join("\n"),
+                    delay_ms: 15,
+                    captured_indicators: Vec::new(),
+                    should_exit: false,
+                }
+            }
+            "awk" => {
+                let input = stdin_input.unwrap_or("");
+                let expr = args.join(" ");
+                let col: Option<usize> = expr
+                    .find('$')
+                    .and_then(|pos| {
+                        let digits: String = expr[pos + 1..]
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect();
+                        digits.parse::<usize>().ok()
+                    });
+                let out: Vec<String> = input
+                    .lines()
+                    .map(|line| match col {
+                        Some(0) | None => line.to_string(),
+                        Some(n) => line
+                            .split_whitespace()
+                            .nth(n.saturating_sub(1))
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                    .collect();
+                ShellExecResult {
+                    output: out.join("\n"),
+                    delay_ms: 20,
+                    captured_indicators: Vec::new(),
+                    should_exit: false,
+                }
+            }
+            "tr" | "sed" => ShellExecResult {
+                output: stdin_input.unwrap_or("").to_string(),
+                delay_ms: 15,
+                captured_indicators: Vec::new(),
+                should_exit: false,
+            },
+            "nohup" => {
+                if args.is_empty() {
+                    ShellExecResult {
+                        output: "nohup: missing operand".to_string(),
+                        delay_ms: 20,
+                        captured_indicators: Vec::new(),
+                        should_exit: false,
+                    }
+                } else {
+                    let inner = args.join(" ");
+                    let mut res = self.execute_line(&inner);
+                    res.captured_indicators.push(format!("nohup:{inner}"));
+                    res
+                }
+            }
+            "busybox" => {
+                if args.is_empty() {
+                    ShellExecResult {
+                        output: "BusyBox v1.30.1 (Ubuntu 1:1.30.1-7ubuntu3) multi-call binary.\nCurrently defined functions:\n\t[, ash, awk, base64, cat, chmod, cp, cut, date, dd, df, echo, env, find, grep, head, id, kill, ln, ls, mkdir, mv, nc, ps, pwd, rm, sed, sh, sleep, sort, tail, tar, touch, tr, uname, uniq, uptime, wc, wget, which, whoami".to_string(),
+                        delay_ms: 25,
+                        captured_indicators: vec!["recon:busybox".to_string()],
+                        should_exit: false,
+                    }
+                } else {
+                    let inner = args.join(" ");
+                    self.execute_line(&inner)
+                }
+            }
             "free" => {
                 let out = if args.iter().any(|a| a.contains('h')) {
                     "               total        used        free      shared  buff/cache   available\n\
@@ -1383,7 +1538,7 @@ impl FakeShellSession {
                 }
             }
             "chmod" | "chown" | "mkdir" | "mv" | "cp" | "ln" | "tar" | "gzip" | "unzip"
-            | "kill" | "pkill" => ShellExecResult {
+            | "kill" | "pkill" | "killall" => ShellExecResult {
                 output: String::new(),
                 delay_ms: 35,
                 captured_indicators: Vec::new(),
@@ -1395,27 +1550,50 @@ impl FakeShellSession {
                 let target_url = indicators
                     .first()
                     .cloned()
-                    .unwrap_or_else(|| "http://remote-payload/bin".to_string());
+                    .unwrap_or_else(|| "http://127.0.0.1/index.html".to_string());
 
-                // If `wget -O /tmp/file` or `curl -o /tmp/file` is used, create a CoW placeholder file
+                let mut saved_name = target_url
+                    .rsplit('/')
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("index.html")
+                    .to_string();
+
                 if let Some(out_pos) = args.iter().position(|&a| a == "-O" || a == "-o") {
                     if let Some(&out_file) = args.get(out_pos + 1) {
-                        let resolved = self.resolve_path(out_file);
-                        self.write_cow_file(&resolved, "#!/bin/elf\n", false);
+                        saved_name = out_file.to_string();
+                        if out_file != "-" {
+                            let resolved = self.resolve_path(out_file);
+                            self.write_cow_file(&resolved, "#!/bin/sh\n", false);
+                        }
                     }
                 }
 
-                ShellExecResult {
-                    output: format!(
-                        "--  Resolving payload host ({target_url})...\n\
+                let is_silent = args.iter().any(|&a| {
+                    a == "-q" || a == "-s" || a == "-fsSL" || a == "-sL" || a == "-sS" || a == "-O-"
+                });
+                let output = if is_silent {
+                    String::new()
+                } else if prog == "wget" {
+                    let (ts, _, _, _) = current_utc_hms();
+                    format!(
+                        "--{ts}--  {target_url}\n\
                          Connecting... connected.\n\
                          HTTP request sent, awaiting response... 200 OK\n\
-                         Length: 1843200 (1.8M) [application/octet-stream]\n\
-                         Saving to:Payload...\n\
-                         100%[======================================>] 1,843,200   412KB/s   in 4.4s\n\
-                         Saved (1843200 bytes)."
-                    ),
-                    delay_ms: 2200,
+                         Length: 184320 (180K) [application/octet-stream]\n\
+                         Saving to: '{saved_name}'\n\
+                         \n\
+                         {saved_name} 100%[===================>] 180.00K   412KB/s    in 0.4s\n\
+                         \n\
+                         {ts} (412 KB/s) - '{saved_name}' saved [184320/184320]"
+                    )
+                } else {
+                    String::new()
+                };
+
+                ShellExecResult {
+                    output,
+                    delay_ms: 900,
                     captured_indicators: if indicators.is_empty() {
                         vec![cmd_line.to_string()]
                     } else {
@@ -1424,28 +1602,63 @@ impl FakeShellSession {
                     should_exit: false,
                 }
             }
-            "echo" | "printf" => ShellExecResult {
-                output: args.join(" ").trim_matches('"').trim_matches('\'').to_string(),
-                delay_ms: 15,
-                captured_indicators: Vec::new(),
-                should_exit: false,
-            },
+            "echo" | "printf" => {
+                let raw = args.join(" ");
+                let trimmed = raw.trim_matches('"').trim_matches('\'');
+                let expanded = trimmed
+                    .replace("$?", &self.last_exit_code.to_string())
+                    .replace("$USER", &self.user)
+                    .replace("$HOSTNAME", &self.persona.hostname)
+                    .replace(
+                        "$HOME",
+                        self.env_vars
+                            .get("HOME")
+                            .map(|s| s.as_str())
+                            .unwrap_or("/root"),
+                    );
+                ShellExecResult {
+                    output: expanded,
+                    delay_ms: 15,
+                    captured_indicators: Vec::new(),
+                    should_exit: false,
+                }
+            }
+            "sh" | "bash" => {
+                if let Some(c_pos) = args.iter().position(|&a| a == "-c") {
+                    let inner = args[c_pos + 1..]
+                        .join(" ")
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string();
+                    if !inner.is_empty() && !inner.starts_with("sh ") && !inner.starts_with("bash ")
+                    {
+                        return self.execute_line(&inner);
+                    }
+                }
+                let indicators = extract_urls_and_ips(cmd_line);
+                ShellExecResult {
+                    output: String::new(),
+                    delay_ms: 80,
+                    captured_indicators: indicators,
+                    should_exit: false,
+                }
+            }
             _ => {
                 if prog.starts_with("./")
                     || prog.starts_with("/tmp/")
                     || prog.starts_with("/var/tmp/")
-                    || prog == "sh"
-                    || prog == "bash"
                 {
                     let indicators = extract_urls_and_ips(cmd_line);
                     return ShellExecResult {
                         output: format!(
-                            "{prog}: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found (required by {prog})\n\
-                             Hint: Host {host} uses Ubuntu 22.04 glibc 2.35; compile with -static or glibc<=2.35",
-                            host = self.persona.hostname
+                            "{prog}: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found (required by {prog})"
                         ),
-                        delay_ms: 1500,
-                        captured_indicators: indicators,
+                        delay_ms: 600,
+                        captured_indicators: if indicators.is_empty() {
+                            vec![format!("exec_payload:{cmd_line}")]
+                        } else {
+                            indicators
+                        },
                         should_exit: false,
                     };
                 }
@@ -1548,4 +1761,57 @@ fn extract_urls_and_ips(cmd_line: &str) -> Vec<String> {
         }
     }
     found
+}
+
+fn current_utc_hms() -> (String, u64, u64, u64) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (year, month, day, _wday) = civil_from_days((secs / 86400) as i64);
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    (
+        format!("{year:04}-{month:02}-{day:02} {h:02}:{m:02}:{s:02}"),
+        h,
+        m,
+        s,
+    )
+}
+
+fn format_current_utc_date() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86400) as i64;
+    let (year, month, day, wday) = civil_from_days(days);
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    const WDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let w = WDAYS[(wday.rem_euclid(7)) as usize];
+    let mon = MONTHS[(month.saturating_sub(1) as usize).min(11)];
+    format!("{w} {mon} {day:02} {h:02}:{m:02}:{s:02} UTC {year:04}")
+}
+
+fn civil_from_days(z: i64) -> (i64, u32, u32, i64) {
+    let wday = z;
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year, m, d, wday)
 }

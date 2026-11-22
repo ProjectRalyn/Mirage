@@ -2,9 +2,7 @@
 resolver = "2"
 members = [
     "crates/mirage-core",
-    "crates/mirage-http",
     "crates/mirage-ssh",
-    "crates/mirage-pam",
     "crates/mirage-bin",
 ]
 
@@ -23,17 +21,6 @@ toml = "0.8"
 rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-http = "1.4"
-http-body = "1.0"
-http-body-util = "0.1"
-tower = { version = "0.5", features = ["util"] }
-tower-layer = "0.3"
-tower-service = "0.3"
-axum = "0.8"
-hyper = { version = "1.8", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
-futures-core = "0.3"
-futures-util = "0.3"
 clap = { version = "4.6", features = ["derive"] }
 sha2 = "0.10"
 hmac = "0.12"
@@ -43,5 +30,4 @@ cipher = "0.4.4"
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets"] }
 base64 = "0.22"
-libc = "0.2"
 sigil-filter = "0.1"

@@ -213,8 +213,8 @@ impl PrebakedPersona {
                 "CVE-2021-41617 (OpenSSH AuthorizedKeysCommand Privilege Escalation)",
             ),
             (
-                "SSH-2.0-libssh_0.8.1",
-                "CVE-2018-10933 (libssh Server State Machine USERAUTH_SUCCESS Bypass)",
+                "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10",
+                "OpenSSH 8.9p1 Ubuntu LTS fallback banner",
             ),
         ];
         let (ssh_banner, ssh_cve_profile) = ssh_profiles[rng.gen_range(0..ssh_profiles.len())];

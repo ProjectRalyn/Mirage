@@ -3,11 +3,11 @@ name = "mirage-deception"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core zero-copy persona rotation engine, sigil-filter attack classifier, in-memory Linux shell, and protocol traps for Mirage."
+description = "Core OpenSSH frontline reverse-proxy configuration, sigil-filter pre-auth CVE inspection engine, persona generator, and SSH-2 honeypot shell for Mirage."
 repository = "https://github.com/ProjectRalyn/Mirage"
 homepage = "https://github.com/ProjectRalyn/Mirage"
-keywords = ["honeypot", "deception", "tarpit", "security", "waf"]
-categories = ["network-programming", "web-programming"]
+keywords = ["ssh", "openssh", "cve", "proxy", "security"]
+categories = ["network-programming"]
 
 [dependencies]
 tokio.workspace = true

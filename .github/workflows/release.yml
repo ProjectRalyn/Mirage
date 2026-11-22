@@ -25,19 +25,12 @@ jobs:
           - arch: aarch64
             runs-on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs-on }}
-    # Build inside Debian 11 (glibc 2.31) so libpam_mirage.so and binaries
-    # remain forward-compatible across modern Linux distributions.
     container:
       image: rust:1-bullseye
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Install PAM development headers
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends libpam0g-dev pkg-config
 
       - name: Cache Cargo registry & target
         uses: actions/cache@v4
@@ -50,21 +43,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.arch }}-cargo-
 
-      - name: Build release binaries and libpam_mirage.so
+      - name: Build release binary
         run: cargo build --release --workspace
 
       - name: Package release archive
         run: |
           mkdir -p dist/pkg
           cp target/release/mirage-daemon dist/pkg/
-          cp target/release/mirage-fake-shell dist/pkg/
-          cp target/release/libpam_mirage.so dist/pkg/
           cp config.example.toml dist/pkg/
-          chmod +x dist/pkg/mirage-daemon dist/pkg/mirage-fake-shell
+          chmod +x dist/pkg/mirage-daemon
           tar -C dist/pkg -czf "dist/mirage-linux-${{ matrix.arch }}.tar.gz" \
             mirage-daemon \
-            mirage-fake-shell \
-            libpam_mirage.so \
             config.example.toml
 
       - name: Upload build artifact

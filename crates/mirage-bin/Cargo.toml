@@ -8,13 +8,8 @@ license.workspace = true
 name = "mirage-daemon"
 path = "src/bin/mirage-daemon.rs"
 
-[[bin]]
-name = "mirage-fake-shell"
-path = "src/bin/mirage-fake-shell.rs"
-
 [dependencies]
 mirage-deception = { path = "../mirage-core" }
-web-mirage = { path = "../mirage-http" }
 mirage-ssh = { path = "../mirage-ssh" }
 tokio.workspace = true
 clap.workspace = true
