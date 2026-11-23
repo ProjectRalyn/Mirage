@@ -508,6 +508,7 @@ deploy_wizard() {
     update_toml_value "ssh" "bruteforce_action" "\"${bf_action}\""
     update_toml_value "ssh" "cve_exploit_action" "\"${cve_action}\""
     update_toml_value "ssh" "scanner_action" "\"${sc_action}\""
+    update_toml_value "ssh" "honeypot_log_file" "\"/var/log/mirage-honeypot.jsonl\""
 
     # Optionally reconfigure local OpenSSH automatically BEFORE starting Mirage on port 22
     echo

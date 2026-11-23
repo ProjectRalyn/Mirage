@@ -126,6 +126,8 @@ pub struct SshProxyConfig {
     pub scanner_action: ResponseAction,
     /// Optional path to append `MIRAGE_BAN` lines for external Fail2Ban / nftables / iptables integration.
     pub ban_log_file: Option<String>,
+    /// Optional path to append structured JSONL attacker session recordings & behavioral fingerprints.
+    pub honeypot_log_file: Option<String>,
 
     // ---- Pre-Auth OpenSSH CVE Shield ----
     /// Maximum seconds allowed for banner + KEX (`SSH_MSG_NEWKEYS`) completion (mitigates CVE-2024-6387 regreSSHion).
@@ -198,6 +200,7 @@ impl Default for SshProxyConfig {
             cve_exploit_action: ResponseAction::SshHoneypot,
             scanner_action: ResponseAction::EndlesshTarpit,
             ban_log_file: None,
+            honeypot_log_file: None,
             preauth_timeout_secs: 15,
             max_banner_bytes: 255,
             max_preauth_packet_bytes: 35000,

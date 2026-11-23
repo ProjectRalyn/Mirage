@@ -133,6 +133,283 @@ struct NegotiatedAlgos {
     strict_kex: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct HoneypotSessionRecorder {
+    pub session_id: String,
+    pub started_unix: u64,
+    pub session_start: Instant,
+    pub client_ip: IpAddr,
+    pub client_banner: String,
+    pub server_banner: String,
+    pub kex_hassh_fingerprint: String,
+    pub kex_algorithms: String,
+    pub auth_attempts: Vec<serde_json::Value>,
+    pub authenticated_user: Option<String>,
+    pub commands: Vec<serde_json::Value>,
+    pub cmd_sequence: Vec<String>,
+    pub behavior_tags: Vec<String>,
+    pub captured_indicators: Vec<String>,
+    pub total_data_packets: u32,
+    pub multi_byte_paste_packets: u32,
+}
+
+impl HoneypotSessionRecorder {
+    fn new(client_ip: IpAddr, client_banner: &str, server_banner: &str) -> Self {
+        let started_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut rnd = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut rnd);
+        let session_id = rnd.iter().map(|b| format!("{b:02x}")).collect();
+        Self {
+            session_id,
+            started_unix,
+            session_start: Instant::now(),
+            client_ip,
+            client_banner: client_banner.to_string(),
+            server_banner: server_banner.to_string(),
+            kex_hassh_fingerprint: String::new(),
+            kex_algorithms: String::new(),
+            auth_attempts: Vec::new(),
+            authenticated_user: None,
+            commands: Vec::new(),
+            cmd_sequence: Vec::new(),
+            behavior_tags: Vec::new(),
+            captured_indicators: Vec::new(),
+            total_data_packets: 0,
+            multi_byte_paste_packets: 0,
+        }
+    }
+
+    fn record_kexinit(&mut self, client_kexinit: &[u8]) {
+        if client_kexinit.len() < 17 {
+            return;
+        }
+        let mut r = SshReader::new(&client_kexinit[17..]);
+        let lists: Vec<String> = (0..10).filter_map(|_| r.read_string().ok()).collect();
+        if lists.len() >= 7 {
+            // HASSH-style canonical input: kex;enc_c2s;mac_c2s;comp_c2s
+            let canonical = format!("{};{};{};{}", lists[0], lists[2], lists[4], lists[6]);
+            let digest = Sha256::digest(canonical.as_bytes());
+            self.kex_hassh_fingerprint =
+                digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+            self.kex_algorithms = lists[0].clone();
+        }
+    }
+
+    fn add_tag(&mut self, tag: &str) {
+        if !self.behavior_tags.iter().any(|t| t == tag) {
+            self.behavior_tags.push(tag.to_string());
+        }
+    }
+
+    fn record_auth(&mut self, method: &str, username: &str, credential: &str, accepted: bool) {
+        if self.auth_attempts.len() < 32 {
+            self.auth_attempts.push(serde_json::json!({
+                "offset_ms": self.session_start.elapsed().as_millis() as u64,
+                "method": method,
+                "username": username,
+                "credential": credential,
+                "accepted": accepted,
+            }));
+        }
+        if accepted {
+            self.authenticated_user = Some(username.to_string());
+        }
+    }
+
+    fn record_command(
+        &mut self,
+        mode: &str,
+        cwd: &str,
+        cmd_line: &str,
+        exit_code: i32,
+        delay_ms: u64,
+        indicators: &[String],
+    ) {
+        let trimmed = cmd_line.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        // Extract primary command tokens for behavioral sequence fingerprint
+        for seg in trimmed.split(&[';', '|'][..]) {
+            let tok = seg
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('(');
+            if !tok.is_empty() && self.cmd_sequence.len() < 128 {
+                let normalized = if tok.contains("=(") || tok.contains('=') {
+                    "VAR_ASSIGN"
+                } else {
+                    tok
+                };
+                self.cmd_sequence.push(normalized.to_string());
+            }
+        }
+
+        // Auto-classify attacker TTP / honeypot-probing behavior tags
+        if trimmed.contains("date +%s%N")
+            || (trimmed.contains("date") && trimmed.contains("sleep"))
+            || trimmed.starts_with("time ")
+        {
+            self.add_tag("TimingProbe");
+        }
+        if trimmed.contains("$RANDOM") || trimmed.contains("$(") || trimmed.contains("$((") {
+            self.add_tag("ShellCapabilityProbe");
+        }
+        if trimmed.contains("/proc") {
+            self.add_tag("ProcFsProbe");
+        }
+        if trimmed.contains("/etc/passwd")
+            || trimmed.contains("whoami")
+            || trimmed == "id"
+            || trimmed.starts_with("id ")
+        {
+            self.add_tag("IdentityRecon");
+        }
+        if trimmed.contains("uname")
+            || trimmed.contains("os-release")
+            || trimmed.contains("lscpu")
+            || trimmed.contains("nvidia-smi")
+            || trimmed.starts_with("ps ")
+            || trimmed == "ps"
+        {
+            self.add_tag("SystemRecon");
+        }
+        if trimmed.starts_with("touch ")
+            || trimmed.contains(">>")
+            || trimmed.contains(" > ")
+            || trimmed.contains("authorized_keys")
+        {
+            self.add_tag("FileWriteProbe");
+        }
+        if trimmed.contains("wget ")
+            || trimmed.contains("curl ")
+            || trimmed.contains("tftp ")
+            || trimmed.contains("/dev/tcp/")
+        {
+            self.add_tag("PayloadDownload");
+        }
+        if trimmed.contains("sudo ") || trimmed.contains("su ") || trimmed.contains("/etc/shadow") {
+            self.add_tag("PrivilegeEscalation");
+        }
+
+        for ind in indicators {
+            if !self.captured_indicators.contains(ind) && self.captured_indicators.len() < 64 {
+                self.captured_indicators.push(ind.clone());
+            }
+        }
+
+        if self.commands.len() < MAX_SHELL_COMMANDS_PER_SESSION {
+            self.commands.push(serde_json::json!({
+                "offset_ms": self.session_start.elapsed().as_millis() as u64,
+                "mode": mode,
+                "cwd": cwd,
+                "command": trimmed,
+                "exit_code": exit_code,
+                "simulated_delay_ms": delay_ms,
+                "indicators": indicators,
+            }));
+        }
+    }
+
+    fn flush(&self, engine: &MirageEngine, persona: &PrebakedPersona) {
+        if self.auth_attempts.is_empty()
+            && self.commands.is_empty()
+            && self.behavior_tags.is_empty()
+        {
+            return;
+        }
+        let duration_ms = self.session_start.elapsed().as_millis() as u64;
+        let seq_joined = self.cmd_sequence.join("->");
+        let cmd_seq_fp: String = if seq_joined.is_empty() {
+            "none".to_string()
+        } else {
+            let d = Sha256::digest(seq_joined.as_bytes());
+            d[..8].iter().map(|b| format!("{b:02x}")).collect()
+        };
+
+        let automation_style = if self.total_data_packets == 0 {
+            "non_interactive_or_auth_only"
+        } else if self.multi_byte_paste_packets * 2 >= self.total_data_packets {
+            "automated_script_or_paste"
+        } else {
+            "interactive_keystrokes"
+        };
+
+        let combined_fp_input = format!(
+            "{}|{}|{}|{}",
+            self.client_banner,
+            self.kex_hassh_fingerprint,
+            cmd_seq_fp,
+            self.behavior_tags.join(",")
+        );
+        let combined_digest = Sha256::digest(combined_fp_input.as_bytes());
+        let attacker_fingerprint: String = combined_digest[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        engine.record_event(
+            self.client_ip,
+            persona,
+            "SSH-FINGERPRINT",
+            "HoneypotSessionSummary",
+            format!(
+                "session={} fp={} kex_fp={} cmd_fp={} style={} tags=[{}] auths={} cmds={}",
+                self.session_id,
+                attacker_fingerprint,
+                self.kex_hassh_fingerprint,
+                cmd_seq_fp,
+                automation_style,
+                self.behavior_tags.join(","),
+                self.auth_attempts.len(),
+                self.commands.len()
+            ),
+        );
+
+        if let Some(path) = engine.config().ssh.honeypot_log_file.as_deref() {
+            if !path.is_empty() {
+                let record = serde_json::json!({
+                    "session_id": self.session_id,
+                    "timestamp_unix": self.started_unix,
+                    "duration_ms": duration_ms,
+                    "client_ip": self.client_ip.to_string(),
+                    "client_banner": self.client_banner,
+                    "server_banner": self.server_banner,
+                    "persona_hostname": persona.hostname,
+                    "attacker_fingerprint": attacker_fingerprint,
+                    "kex_hassh_fingerprint": self.kex_hassh_fingerprint,
+                    "kex_algorithms": self.kex_algorithms,
+                    "command_sequence_fingerprint": cmd_seq_fp,
+                    "command_sequence": seq_joined,
+                    "interaction_style": automation_style,
+                    "behavior_tags": self.behavior_tags,
+                    "authenticated_user": self.authenticated_user,
+                    "auth_attempts": self.auth_attempts,
+                    "commands": self.commands,
+                    "captured_indicators": self.captured_indicators,
+                    "input_stats": {
+                        "total_data_packets": self.total_data_packets,
+                        "multi_byte_paste_packets": self.multi_byte_paste_packets,
+                    }
+                });
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "{record}");
+                }
+            }
+        }
+    }
+}
+
 struct SshPacketCodec<S> {
     stream: S,
     c2s_seq: u32,
@@ -292,6 +569,35 @@ pub async fn run_ssh2_deception_session<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let mut recorder = HoneypotSessionRecorder::new(client_ip, client_banner, server_banner);
+    let res = run_ssh2_deception_session_inner(
+        stream,
+        &engine,
+        &persona,
+        client_ip,
+        client_banner,
+        server_banner,
+        pre_read_client_kexinit,
+        &mut recorder,
+    )
+    .await;
+    recorder.flush(&engine, &persona);
+    res
+}
+
+async fn run_ssh2_deception_session_inner<S>(
+    stream: S,
+    engine: &Arc<MirageEngine>,
+    persona: &Arc<PrebakedPersona>,
+    client_ip: IpAddr,
+    client_banner: &str,
+    server_banner: &str,
+    pre_read_client_kexinit: Option<Vec<u8>>,
+    recorder: &mut HoneypotSessionRecorder,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let idle_timeout = Duration::from_secs(engine.config().ssh.honeypot_idle_timeout_secs.max(10));
     let max_duration = Duration::from_secs(engine.config().ssh.honeypot_max_duration_secs.max(30));
     let session_start = Instant::now();
@@ -324,6 +630,7 @@ where
         }
     };
 
+    recorder.record_kexinit(&client_kexinit);
     let negotiated = negotiate_algos(&client_kexinit);
 
     // 3. Read Client SSH_MSG_KEX_ECDH_INIT (opcode 30)
@@ -548,9 +855,11 @@ where
             }
             // CVE-2018-10933 libssh Authentication Bypass Trap
             SSH_MSG_USERAUTH_SUCCESS if authenticated_user.is_none() => {
+                recorder.add_tag("CVE-2018-10933-AuthBypass");
+                recorder.record_auth("cve_2018_10933_bypass", &persona.ssh_vfs.default_user, "", true);
                 engine.record_event(
                     client_ip,
-                    &persona,
+                    persona,
                     "SSH-HONEYPOT",
                     "CVE-2018-10933-AuthBypassTrap",
                     "Client sent unauthenticated SSH_MSG_USERAUTH_SUCCESS; trapping in fake shell",
@@ -573,10 +882,12 @@ where
                         match engine.evaluate_ssh_password_attempt(client_ip, &username, &password)
                         {
                             SshAuthDecision::AcceptIntoFakeShell { .. } => {
+                                recorder.record_auth("password", &username, &password, true);
                                 authenticated_user = Some(username);
                                 codec.write_packet(&[SSH_MSG_USERAUTH_SUCCESS]).await?;
                             }
                             SshAuthDecision::RejectAfterDelay { delay_ms, .. } => {
+                                recorder.record_auth("password", &username, &password, false);
                                 auth_failures += 1;
                                 if delay_ms > 0 {
                                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -600,9 +911,15 @@ where
                         if let (Ok(algo), Ok(blob)) = (r.read_string(), r.read_bytes()) {
                             let fp = base64::engine::general_purpose::STANDARD_NO_PAD
                                 .encode(Sha256::digest(blob));
+                            recorder.record_auth(
+                                "publickey",
+                                &username,
+                                &format!("{algo}:SHA256:{fp}"),
+                                false,
+                            );
                             engine.record_event(
                                 client_ip,
-                                &persona,
+                                persona,
                                 "SSH-HONEYPOT",
                                 "PublicKeyProbe",
                                 format!(
@@ -650,9 +967,10 @@ where
                     } else {
                         format!("channel_type={chan_type}")
                     };
+                    recorder.add_tag("PortForwardingProbe");
                     engine.record_event(
                         client_ip,
-                        &persona,
+                        persona,
                         "SSH-HONEYPOT",
                         "PortForwardingAttemptBlocked",
                         detail,
@@ -708,11 +1026,13 @@ where
                         )
                         .with_session_context(server_banner, client_ip);
                         let exec_res = run_logged_shell_command(
-                            &engine,
-                            &persona,
+                            engine,
+                            persona,
                             client_ip,
                             &mut session,
                             &cmd,
+                            "exec",
+                            recorder,
                         )
                         .await;
 
@@ -758,6 +1078,12 @@ where
             SSH_MSG_CHANNEL_DATA => {
                 let _recipient_channel = r.read_u32()?;
                 let data = r.read_bytes()?;
+
+                recorder.total_data_packets = recorder.total_data_packets.saturating_add(1);
+                if data.len() > 4 {
+                    recorder.multi_byte_paste_packets =
+                        recorder.multi_byte_paste_packets.saturating_add(1);
+                }
 
                 let Some(session) = shell_session.as_mut() else {
                     continue;
@@ -857,11 +1183,13 @@ where
                                 return Ok(());
                             }
                             let res = run_logged_shell_command(
-                                &engine,
-                                &persona,
+                                engine,
+                                persona,
                                 client_ip,
                                 session,
                                 &cmd_line,
+                                "shell",
+                                recorder,
                             )
                             .await;
 
@@ -958,8 +1286,11 @@ async fn run_logged_shell_command(
     client_ip: IpAddr,
     session: &mut FakeShellSession,
     cmd_line: &str,
+    mode: &str,
+    recorder: &mut HoneypotSessionRecorder,
 ) -> mirage_deception::ShellExecResult {
     let trimmed = cmd_line.trim();
+    let cwd_before = session.cwd().to_string();
     if !trimmed.is_empty() {
         engine
             .metrics
@@ -975,6 +1306,15 @@ async fn run_logged_shell_command(
     }
 
     let res = session.execute_line(trimmed);
+
+    recorder.record_command(
+        mode,
+        &cwd_before,
+        trimmed,
+        session.last_exit_code(),
+        res.delay_ms,
+        &res.captured_indicators,
+    );
 
     for indicator in &res.captured_indicators {
         engine

@@ -31,6 +31,8 @@ cve_exploit_action = "ssh_honeypot"
 scanner_action = "endlessh_tarpit"
 # Optional file to append `MIRAGE_BAN` lines for host-level Fail2Ban / nftables sync:
 # ban_log_file = "/var/log/mirage-bans.log"
+# Structured JSONL log for attacker honeypot session recordings & behavioral fingerprints:
+honeypot_log_file = "/var/log/mirage-honeypot.jsonl"
 
 # Pre-Auth OpenSSH CVE Shield (CVE-2024-6387 regreSSHion, CVE-2025-26466 PING DoS, CVE-2023-48795 Terrapin, CVE-2023-25136)
 preauth_timeout_secs = 15

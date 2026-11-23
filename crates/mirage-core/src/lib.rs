@@ -148,5 +148,92 @@ mod tests {
         // 6. Adversarial systemd (`systemctl status nonexistent` -> not found)
         let bad_unit = arch_shell.execute_line("systemctl status nonexistent");
         assert!(bad_unit.output.contains("could not be found"));
+
+        // 7. Red-team 5 shell realism probes:
+        // (a) Command substitution `$(date +%s%N)`, virtual clock advancement across `sleep 2`,
+        //     arithmetic `$(( (E-S)/1000000 ))`, and `$RANDOM` expansion
+        let timing_probe = arch_shell.execute_line(
+            "S=$(date +%s%N); sleep 2; E=$(date +%s%N); echo DELTA_MS=$(( (E-S)/1000000 ))",
+        );
+        assert!(
+            timing_probe.output.trim().starts_with("DELTA_MS="),
+            "unexpected output: {}",
+            timing_probe.output
+        );
+        let delta_val: i64 = timing_probe
+            .output
+            .trim()
+            .trim_start_matches("DELTA_MS=")
+            .parse()
+            .expect("numeric DELTA_MS");
+        assert!(
+            (1950..=2150).contains(&delta_val),
+            "expected ~2000ms delta, got {delta_val}"
+        );
+
+        let r1 = arch_shell.execute_line("echo $RANDOM").output;
+        let r2 = arch_shell.execute_line("echo $RANDOM").output;
+        assert!(r1.trim().parse::<u16>().is_ok());
+        assert!(r2.trim().parse::<u16>().is_ok());
+        assert_ne!(r1.trim(), r2.trim());
+
+        // (b) Pipe `ls / | head -3` outputs 3 lines; `head -6 /etc/passwd` outputs 6 lines
+        let head3 = arch_shell.execute_line("ls / | head -3");
+        assert_eq!(head3.output.lines().count(), 3);
+        let head6_passwd = arch_shell.execute_line("head -6 /etc/passwd");
+        assert_eq!(head6_passwd.output.lines().count(), 6);
+
+        // (c) `/proc` has `dr-xr-xr-x` directories for PIDs and size 0 for virtual files,
+        //     and `/proc/loadavg` matches `w` load average
+        let ls_proc = arch_shell.execute_line("ls -la /proc");
+        assert!(
+            ls_proc.output.lines().any(|l| l.starts_with("dr-xr-xr-x") && l.ends_with(" 1")),
+            "expected /proc/1 directory in:\n{}",
+            ls_proc.output
+        );
+        assert!(
+            ls_proc
+                .output
+                .lines()
+                .any(|l| l.starts_with("-r--r--r--") && l.contains("     0 ") && l.ends_with(" cpuinfo")),
+            "expected 0-byte /proc/cpuinfo in:\n{}",
+            ls_proc.output
+        );
+        let loadavg_txt = arch_shell.execute_line("cat /proc/loadavg").output;
+        let load_first3: Vec<&str> = loadavg_txt.split_whitespace().take(3).collect();
+        let w_out = arch_shell.execute_line("w").output;
+        assert!(
+            w_out.contains(&format!(
+                "load average: {}, {}, {}",
+                load_first3[0], load_first3[1], load_first3[2]
+            )),
+            "mismatch between /proc/loadavg ({loadavg_txt}) and w ({w_out})"
+        );
+
+        // (d) Identity & OS process consistency: logged in as `devops` on Arch (`OpenSSH_10.6`),
+        //     `$HOME` is `/home/devops`, `/etc/passwd` has `devops:x:1000:1000`, and `ps aux`
+        //     has no Debian-specific `/usr/lib/postgresql/14` or `php-fpm`
+        assert_eq!(arch_shell.execute_line("echo $HOME").output.trim(), "/home/devops");
+        let passwd_devops = arch_shell.execute_line("grep devops /etc/passwd").output;
+        assert!(passwd_devops.contains("devops:x:1000:1000:"));
+        assert!(passwd_devops.contains(":/home/devops:/bin/bash"));
+        let ps_out = arch_shell.execute_line("ps aux").output;
+        assert!(!ps_out.contains("/usr/lib/postgresql/14"));
+        assert!(!ps_out.contains("php-fpm"));
+        assert!(ps_out.contains("devops"));
+
+        // (e) Single-file `ls -la /tmp/zz_probe` after `touch /tmp/zz_probe`
+        let touch_ls =
+            arch_shell.execute_line("touch /tmp/zz_probe && ls -la /tmp/zz_probe");
+        assert_eq!(
+            touch_ls.output.lines().count(),
+            1,
+            "expected single file line, got:\n{}",
+            touch_ls.output
+        );
+        assert!(touch_ls.output.contains("/tmp/zz_probe"));
+        assert!(!touch_ls.output.contains("total "));
+        let missing_ls = arch_shell.execute_line("ls -la /tmp/does_not_exist_999");
+        assert!(missing_ls.output.contains("No such file or directory"));
     }
 }
