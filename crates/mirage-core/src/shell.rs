@@ -25,6 +25,8 @@ pub struct FakeShellSession {
     persona: Arc<PrebakedPersona>,
     user: String,
     cwd: String,
+    client_ip: String,
+    os_is_arch: bool,
     last_exit_code: i32,
     env_vars: HashMap<String, String>,
     /// Bounded Copy-on-Write file overlay (max 16 files, 8 KB total) so attackers can write
@@ -76,6 +78,8 @@ impl FakeShellSession {
             persona,
             user,
             cwd: home,
+            client_ip: "10.240.0.5".to_string(),
+            os_is_arch: false,
             last_exit_code: 0,
             env_vars,
             cow_files: HashMap::new(),
@@ -84,8 +88,23 @@ impl FakeShellSession {
         }
     }
 
+    /// Align OS personality (MOTD, `uname`, `/etc/os-release`, `who`) with the cached SSH banner & client IP.
+    pub fn with_session_context(mut self, server_banner: &str, client_ip: std::net::IpAddr) -> Self {
+        self.client_ip = client_ip.to_string();
+        let lower = server_banner.to_ascii_lowercase();
+        if !lower.contains("ubuntu") && !lower.contains("debian") && lower.contains("openssh_10") {
+            self.os_is_arch = true;
+        }
+        self
+    }
+
     pub fn welcome_banner(&self) -> String {
-        self.persona.ssh_vfs.motd.clone()
+        if self.os_is_arch {
+            let (ts, _, _, _) = current_utc_hms();
+            format!("Last login: {ts} UTC from {}\r\n", self.client_ip)
+        } else {
+            self.persona.ssh_vfs.motd.clone()
+        }
     }
 
     pub fn prompt(&self) -> String {
@@ -220,11 +239,12 @@ impl FakeShellSession {
         }
 
         let expanded_first = self.expand_variables(stages[0]);
-        let mut res = self.execute_single(&expanded_first, None);
+        let mut res = self.execute_single(&expanded_first, None, stages.len() > 1);
 
-        for &stage in &stages[1..] {
+        for (idx, &stage) in stages[1..].iter().enumerate() {
             let expanded_stage = self.expand_variables(stage);
-            let next_res = self.execute_single(&expanded_stage, Some(&res.output));
+            let has_more_pipes = idx + 2 < stages.len();
+            let next_res = self.execute_single(&expanded_stage, Some(&res.output), has_more_pipes);
             res.output = next_res.output;
             res.delay_ms = res.delay_ms.saturating_add(next_res.delay_ms);
             res.captured_indicators.extend(next_res.captured_indicators);
@@ -265,6 +285,25 @@ impl FakeShellSession {
         if let Some(cow) = self.cow_files.get(resolved_path) {
             return Some(cow.clone());
         }
+        if self.os_is_arch && resolved_path == "/etc/os-release" {
+            return Some(
+                "NAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux\"\nID=arch\nBUILD_ID=rolling\nANSI_COLOR=\"38;2;23;147;209\"\n"
+                    .to_string(),
+            );
+        }
+        if resolved_path == "/proc/version" {
+            return Some(if self.os_is_arch {
+                "Linux version 6.12.9-arch1-1 (linux@archlinux) (gcc (GCC) 14.2.1 20250110, GNU ld (GNU Binutils) 2.43.1) #1 SMP PREEMPT_DYNAMIC\n".to_string()
+            } else {
+                "Linux version 5.15.0-91-generic (buildd@lcy02-amd64-045) (gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0) #101-Ubuntu SMP\n".to_string()
+            });
+        }
+        if resolved_path == "/proc/uptime" {
+            return Some("3591248.42 14310291.18\n".to_string());
+        }
+        if resolved_path == "/proc/loadavg" {
+            return Some("1.42 1.38 1.29 2/418 19402\n".to_string());
+        }
         self.persona.ssh_vfs.files.get(resolved_path).cloned()
     }
 
@@ -291,7 +330,12 @@ impl FakeShellSession {
         }
     }
 
-    fn execute_single(&mut self, cmd_line: &str, stdin_input: Option<&str>) -> ShellExecResult {
+    fn execute_single(
+        &mut self,
+        cmd_line: &str,
+        stdin_input: Option<&str>,
+        is_piped_out: bool,
+    ) -> ShellExecResult {
         // Handle inline `VAR=val` assignment or `export VAR=val`
         let parts: Vec<&str> = cmd_line.split_whitespace().collect();
         if parts.is_empty() {
@@ -379,18 +423,34 @@ impl FakeShellSession {
                 captured_indicators: Vec::new(),
                 should_exit: false,
             },
-            "w" => ShellExecResult {
-                output: self.persona.ssh_vfs.w_output.clone(),
-                delay_ms: 40,
-                captured_indicators: Vec::new(),
-                should_exit: false,
-            },
-            "who" => ShellExecResult {
-                output: format!("{} pts/0        2026-11-22 03:12 (10.240.0.5)", self.user),
-                delay_ms: 30,
-                captured_indicators: Vec::new(),
-                should_exit: false,
-            },
+            "w" => {
+                let (_, h, m, _) = current_utc_hms();
+                ShellExecResult {
+                    output: format!(
+                        " {h:02}:{m:02}:00 up 41 days, 18:12,  1 user,  load average: 1.42, 1.38, 1.29\n\
+                         USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT\n\
+                         {:<8} pts/0    {:<16} {h:02}:{m:02}    0.00s  0.02s  0.00s -bash",
+                        self.user, self.client_ip
+                    ),
+                    delay_ms: 40,
+                    captured_indicators: Vec::new(),
+                    should_exit: false,
+                }
+            }
+            "who" => {
+                let (ts, _, _, _) = current_utc_hms();
+                ShellExecResult {
+                    output: format!(
+                        "{:<8} pts/0        {} ({})",
+                        self.user,
+                        &ts[..16],
+                        self.client_ip
+                    ),
+                    delay_ms: 30,
+                    captured_indicators: Vec::new(),
+                    should_exit: false,
+                }
+            }
             "last" | "lastlog" => ShellExecResult {
                 output: self.persona.ssh_vfs.last_output.clone(),
                 delay_ms: 50,
@@ -412,35 +472,54 @@ impl FakeShellSession {
                     should_exit: false,
                 }
             }
-            "hostnamectl" => ShellExecResult {
-                output: format!(
-                    " Static hostname: {host}\n\
-                     \x20      Icon name: computer-server\n\
-                     \x20        Chassis: server\n\
-                     \x20     Machine ID: 9f4b2c8e1a7d3065b8e2f1c4a9d0731e\n\
-                     \x20        Boot ID: 4a1c8e9d2b7410a9f8a7c2e1b4d603f5\n\
-                     Operating System: Ubuntu 22.04.3 LTS\n\
-                     \x20         Kernel: Linux 5.15.0-91-generic\n\
-                     \x20   Architecture: x86-64\n\
-                     \x20Hardware Vendor: Supermicro\n\
-                     \x20 Hardware Model: AS-8125GS-TNHR",
-                    host = self.persona.hostname
-                ),
-                delay_ms: 45,
-                captured_indicators: Vec::new(),
-                should_exit: false,
-            },
-            "lsb_release" => ShellExecResult {
-                output: "No LSB modules are available.\n\
-                         Distributor ID:\tUbuntu\n\
-                         Description:\tUbuntu 22.04.3 LTS\n\
-                         Release:\t22.04\n\
-                         Codename:\tjammy"
-                    .to_string(),
-                delay_ms: 35,
-                captured_indicators: Vec::new(),
-                should_exit: false,
-            },
+            "hostnamectl" => {
+                let (os_name, kernel_ver) = if self.os_is_arch {
+                    ("Arch Linux", "Linux 6.12.9-arch1-1")
+                } else {
+                    ("Ubuntu 22.04.3 LTS", "Linux 5.15.0-91-generic")
+                };
+                ShellExecResult {
+                    output: format!(
+                        " Static hostname: {host}\n\
+                         \x20      Icon name: computer-server\n\
+                         \x20        Chassis: server\n\
+                         \x20     Machine ID: 9f4b2c8e1a7d3065b8e2f1c4a9d0731e\n\
+                         \x20        Boot ID: 4a1c8e9d2b7410a9f8a7c2e1b4d603f5\n\
+                         Operating System: {os_name}\n\
+                         \x20         Kernel: {kernel_ver}\n\
+                         \x20   Architecture: x86-64\n\
+                         \x20Hardware Vendor: Supermicro\n\
+                         \x20 Hardware Model: AS-8125GS-TNHR",
+                        host = self.persona.hostname
+                    ),
+                    delay_ms: 45,
+                    captured_indicators: Vec::new(),
+                    should_exit: false,
+                }
+            }
+            "lsb_release" => {
+                if self.os_is_arch {
+                    self.last_exit_code = 127;
+                    ShellExecResult {
+                        output: "bash: lsb_release: command not found".to_string(),
+                        delay_ms: 25,
+                        captured_indicators: Vec::new(),
+                        should_exit: false,
+                    }
+                } else {
+                    ShellExecResult {
+                        output: "No LSB modules are available.\n\
+                                 Distributor ID:\tUbuntu\n\
+                                 Description:\tUbuntu 22.04.3 LTS\n\
+                                 Release:\t22.04\n\
+                                 Codename:\tjammy"
+                            .to_string(),
+                        delay_ms: 35,
+                        captured_indicators: Vec::new(),
+                        should_exit: false,
+                    }
+                }
+            }
             "pwd" => ShellExecResult {
                 output: self.cwd.clone(),
                 delay_ms: 15,
@@ -448,10 +527,24 @@ impl FakeShellSession {
                 should_exit: false,
             },
             "uname" => {
+                let (full_uname, rel) = if self.os_is_arch {
+                    (
+                        format!(
+                            "Linux {} 6.12.9-arch1-1 #1 SMP PREEMPT_DYNAMIC Fri, 10 Jan 2025 14:22:10 +0000 x86_64 GNU/Linux",
+                            self.persona.hostname
+                        ),
+                        "6.12.9-arch1-1".to_string(),
+                    )
+                } else {
+                    (
+                        self.persona.ssh_vfs.kernel_uname.clone(),
+                        self.persona.ssh_vfs.kernel_release.clone(),
+                    )
+                };
                 let out = if args.iter().any(|a| a.contains('a')) {
-                    self.persona.ssh_vfs.kernel_uname.clone()
+                    full_uname
                 } else if args.iter().any(|a| a.contains('r')) {
-                    self.persona.ssh_vfs.kernel_release.clone()
+                    rel
                 } else if args.iter().any(|a| a.contains('n')) {
                     self.persona.hostname.clone()
                 } else if args.iter().any(|a| a.contains('m')) {
@@ -544,17 +637,44 @@ impl FakeShellSession {
             }
             "systemctl" => {
                 let out = if args.contains(&"status") {
-                    let unit = args.last().copied().unwrap_or("ssh.service");
-                    format!(
-                        "● {unit} - Production Daemon ({host})\n\
-                         \x20    Loaded: loaded (/lib/systemd/system/{unit}; enabled; vendor preset: enabled)\n\
-                         \x20    Active: active (running) since Wed 2026-10-12 03:14:00 UTC; 41 days ago\n\
-                         \x20  Main PID: 1142 ({unit})\n\
-                         \x20     Tasks: 18 (limit: 614400)\n\
-                         \x20    Memory: 412.0M\n\
-                         \x20       CPU: 42min 11.402s",
-                        host = self.persona.hostname
-                    )
+                    let raw_unit = args
+                        .iter()
+                        .copied()
+                        .find(|a| !a.starts_with('-') && *a != "status")
+                        .unwrap_or("sshd");
+                    let unit_norm = raw_unit.strip_suffix(".service").unwrap_or(raw_unit);
+                    let known = matches!(
+                        unit_norm,
+                        "ssh" | "sshd" | "docker" | "containerd" | "postgresql" | "redis" | "redis-server" | "nginx"
+                    );
+                    if !known {
+                        self.last_exit_code = 4;
+                        format!("Unit {unit_norm}.service could not be found.")
+                    } else {
+                        let (unit_file, desc, bin) = match unit_norm {
+                            "ssh" | "sshd" => (
+                                if self.os_is_arch { "sshd.service" } else { "ssh.service" },
+                                "OpenBSD Secure Shell server",
+                                "/usr/sbin/sshd -D [listener] 0 of 10-100 startups",
+                            ),
+                            "docker" => ("docker.service", "Docker Application Container Engine", "/usr/bin/dockerd -H fd://"),
+                            "postgresql" => ("postgresql.service", "PostgreSQL RDBMS", "/usr/lib/postgresql/14/bin/postgres"),
+                            "redis" | "redis-server" => ("redis-server.service", "Advanced key-value store", "/usr/bin/redis-server 127.0.0.1:6379"),
+                            "nginx" => ("nginx.service", "A high performance web server", "/usr/sbin/nginx -g daemon on;"),
+                            _ => ("containerd.service", "containerd container runtime", "/usr/bin/containerd"),
+                        };
+                        format!(
+                            "● {unit_file} - {desc}\n\
+                             \x20    Loaded: loaded (/usr/lib/systemd/system/{unit_file}; enabled; preset: enabled)\n\
+                             \x20    Active: active (running) since Wed 2026-10-12 03:14:00 UTC; 41 days ago\n\
+                             \x20  Main PID: 842 (sshd)\n\
+                             \x20     Tasks: 1 (limit: 614400)\n\
+                             \x20    Memory: 14.2M\n\
+                             \x20       CPU: 2.418s\n\
+                             \x20    CGroup: /system.slice/{unit_file}\n\
+                             \x20            └─842 {bin}"
+                        )
+                    }
                 } else {
                     self.persona.ssh_vfs.systemctl_output.clone()
                 };
@@ -714,9 +834,44 @@ impl FakeShellSession {
                 captured_indicators: Vec::new(),
                 should_exit: false,
             },
-            "unset" | "alias" | "type" | "sleep" => ShellExecResult {
+            "sleep" => {
+                let secs = args
+                    .first()
+                    .and_then(|s| s.trim_end_matches('s').parse::<f64>().ok())
+                    .unwrap_or(1.0);
+                let delay_ms = (secs * 1000.0).clamp(0.0, 5000.0) as u64;
+                ShellExecResult {
+                    output: String::new(),
+                    delay_ms,
+                    captured_indicators: Vec::new(),
+                    should_exit: false,
+                }
+            }
+            "time" => {
+                if args.is_empty() {
+                    ShellExecResult {
+                        output: "\nreal\t0m0.000s\nuser\t0m0.000s\nsys\t0m0.000s".to_string(),
+                        delay_ms: 5,
+                        captured_indicators: Vec::new(),
+                        should_exit: false,
+                    }
+                } else {
+                    let inner = args.join(" ");
+                    let mut res = self.execute_single(&inner, stdin_input, is_piped_out);
+                    let secs = res.delay_ms / 1000;
+                    let ms = res.delay_ms % 1000;
+                    let timing = format!("real\t0m{secs}.{ms:03}s\nuser\t0m0.002s\nsys\t0m0.001s");
+                    res.output = if res.output.is_empty() {
+                        timing
+                    } else {
+                        format!("{}\n{timing}", res.output)
+                    };
+                    res
+                }
+            }
+            "unset" | "alias" | "type" => ShellExecResult {
                 output: String::new(),
-                delay_ms: if prog == "sleep" { 250 } else { 15 },
+                delay_ms: 15,
                 captured_indicators: Vec::new(),
                 should_exit: false,
             },
@@ -1235,6 +1390,8 @@ impl FakeShellSession {
                     prog == "ll" || args.iter().any(|a| a.starts_with('-') && a.contains('l'));
                 let show_all =
                     prog == "ll" || args.iter().any(|a| a.starts_with('-') && a.contains('a'));
+                let one_per_line =
+                    is_piped_out || args.iter().any(|a| a.starts_with('-') && a.contains('1'));
                 let target_arg = args
                     .iter()
                     .copied()
@@ -1250,7 +1407,6 @@ impl FakeShellSession {
                     .cloned()
                     .unwrap_or_default();
 
-                // Merge any CoW files written in this directory
                 let prefix = if resolved == "/" {
                     "/".to_string()
                 } else {
@@ -1269,14 +1425,15 @@ impl FakeShellSession {
                 }
                 entries.sort();
 
+                let is_home_dir = resolved.starts_with("/home/") || resolved == "/home";
                 let output = if show_long {
                     let mut lines = vec![format!("total {}", (entries.len() + 2) * 4)];
+                    let dot_owner = if is_home_dir { self.user.as_str() } else { "root" };
                     if show_all {
                         lines.push(format!(
-                            "drwxr-xr-x 5 {u} {u}  4096 Nov 22 03:12 .",
-                            u = self.user
+                            "drwxr-xr-x 5 {dot_owner:<4} {dot_owner:<4}  4096 Nov 22 03:12 ."
                         ));
-                        lines.push("drwxr-xr-x 4 root root 4096 Nov 10 09:00 ..".to_string());
+                        lines.push("drwxr-xr-x 4 root root  4096 Oct 12 09:00 ..".to_string());
                     }
                     for entry in entries {
                         let full = if resolved == "/" {
@@ -1285,17 +1442,30 @@ impl FakeShellSession {
                             format!("{resolved}/{entry}")
                         };
                         let is_dir = self.persona.ssh_vfs.directories.contains_key(&full);
-                        let perms = if is_dir { "drwxr-xr-x" } else { "-rw-r-----" };
+                        let perms = if full == "/tmp" {
+                            "drwxrwxrwt"
+                        } else if is_dir {
+                            "drwxr-xr-x"
+                        } else {
+                            "-rw-r--r--"
+                        };
+                        let owner = if full.starts_with("/home/") && full != "/home" {
+                            self.user.as_str()
+                        } else {
+                            "root"
+                        };
                         let size = self
                             .read_vfs_file(&full)
                             .map(|c| c.len())
                             .unwrap_or(4096);
+                        let ts = deterministic_entry_timestamp(&entry);
                         lines.push(format!(
-                            "{perms} 1 {user} {user} {size:>5} Nov 21 19:40 {entry}",
-                            user = self.user
+                            "{perms} 1 {owner:<4} {owner:<4} {size:>5} {ts} {entry}"
                         ));
                     }
                     lines.join("\n")
+                } else if one_per_line {
+                    entries.join("\n")
                 } else {
                     entries.join("  ")
                 };
@@ -1814,4 +1984,18 @@ fn civil_from_days(z: i64) -> (i64, u32, u32, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let year = y + if m <= 2 { 1 } else { 0 };
     (year, m, d, wday)
+}
+
+fn deterministic_entry_timestamp(name: &str) -> String {
+    let mut h = 0x811c_9dc5u32;
+    for &b in name.as_bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    const MONTHS: [&str; 3] = ["Sep", "Oct", "Nov"];
+    let mon = MONTHS[(h as usize) % MONTHS.len()];
+    let day = 1 + ((h >> 8) % 21);
+    let hour = (h >> 16) % 24;
+    let min = (h >> 24) % 60;
+    format!("{mon} {day:2} {hour:02}:{min:02}")
 }

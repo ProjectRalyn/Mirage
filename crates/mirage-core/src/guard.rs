@@ -195,9 +195,11 @@ impl IpGuardTable {
 
         if cfg.max_conns_per_ip_window > 0 && slot.conn_count > cfg.max_conns_per_ip_window {
             let until = now.saturating_add(cfg.quarantine_secs);
-            if until > slot.quarantine_until_sec {
+            if now >= slot.quarantine_until_sec {
                 slot.quarantine_until_sec = until;
                 slot.quarantine_category = ThreatCategory::BruteForce;
+            } else if until > slot.quarantine_until_sec {
+                slot.quarantine_until_sec = until;
             }
         }
 

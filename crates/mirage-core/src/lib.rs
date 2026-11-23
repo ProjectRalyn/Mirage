@@ -125,5 +125,28 @@ mod tests {
         assert_eq!(shell.execute_line("arch").output.trim(), "x86_64");
         let cut_res = shell.execute_line("cat /etc/passwd | grep root | cut -d: -f1");
         assert_eq!(cut_res.output.trim(), "root");
+
+        // Verify 6-point realism criteria:
+        // 1. Version consistency with OpenSSH_10.6 (no Ubuntu 22.04 mismatch)
+        let arch_shell = FakeShellSession::new(persona.clone(), Some("devops"))
+            .with_session_context("SSH-2.0-OpenSSH_10.6", "172.16.36.36".parse().unwrap());
+        assert!(!arch_shell.welcome_banner().contains("Ubuntu 22.04"));
+        let mut arch_shell = arch_shell;
+        assert!(arch_shell.execute_line("uname -a").output.contains("arch1-1"));
+        // 2. Filesystem root has /proc, /sys and varied timestamps
+        let ls_root = arch_shell.execute_line("ls -la /");
+        assert!(ls_root.output.contains("proc") && ls_root.output.contains("sys"));
+        // 3. Piped ls outputs 1 entry per line (`ls / | wc -l` == 17)
+        assert_eq!(arch_shell.execute_line("ls / | wc -l").output.trim(), "17");
+        // 4. Timing (`time sleep 1` waits ~1000ms and prints real/user/sys)
+        let timed = arch_shell.execute_line("time sleep 1");
+        assert_eq!(timed.delay_ms, 1000);
+        assert!(timed.output.contains("real\t0m1.000s"));
+        // 5. Session state (`cd /tmp && pwd`, `who` shows attacker IP)
+        assert_eq!(arch_shell.execute_line("cd /tmp && pwd").output.trim(), "/tmp");
+        assert!(arch_shell.execute_line("who").output.contains("172.16.36.36"));
+        // 6. Adversarial systemd (`systemctl status nonexistent` -> not found)
+        let bad_unit = arch_shell.execute_line("systemctl status nonexistent");
+        assert!(bad_unit.output.contains("could not be found"));
     }
 }

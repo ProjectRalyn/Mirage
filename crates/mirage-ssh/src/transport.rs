@@ -705,7 +705,8 @@ where
                         let mut session = FakeShellSession::new(
                             persona.clone(),
                             authenticated_user.as_deref(),
-                        );
+                        )
+                        .with_session_context(server_banner, client_ip);
                         let exec_res = run_logged_shell_command(
                             &engine,
                             &persona,
@@ -737,7 +738,8 @@ where
                         let session = FakeShellSession::new(
                             persona.clone(),
                             authenticated_user.as_deref(),
-                        );
+                        )
+                        .with_session_context(server_banner, client_ip);
                         let welcome = format!("{}{}", session.welcome_banner(), session.prompt());
                         send_channel_data(&mut codec, client_channel_id, welcome.as_bytes())
                             .await?;
